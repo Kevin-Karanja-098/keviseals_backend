@@ -1,29 +1,45 @@
 from rest_framework import serializers
 from .models import *
 
+
 class LandlordRegistrationSerializer(serializers.Serializer):
     email = serializers.EmailField()
     phone_number = serializers.CharField()
     password = serializers.CharField(write_only=True)
-    # CRITICAL FIX: Mark national_id as write_only so DRF doesn't look for it on the User object afterwards
+
     national_id = serializers.CharField(write_only=True)
-    id_front = serializers.ImageField()
-    id_back = serializers.ImageField()
+
+    id_front = serializers.ImageField(
+        write_only=True
+    )
+
+    id_back = serializers.ImageField(
+        write_only=True
+    )
+
     profile_photo = serializers.ImageField(
-        required=False
+        required=False,
+        write_only=True
     )
 
     def validate_email(self, value):
         if User.objects.filter(email=value).exists():
-            raise serializers.ValidationError("Email already exists")
+            raise serializers.ValidationError(
+                "Email already exists"
+            )
         return value
 
     def validate_phone_number(self, value):
-        if User.objects.filter(phone_number=value).exists():
-            raise serializers.ValidationError("Phone number already exists")
+        if User.objects.filter(
+            phone_number=value
+        ).exists():
+            raise serializers.ValidationError(
+                "Phone number already exists"
+            )
         return value
 
     def create(self, validated_data):
+
         user = User.objects.create_user(
             email=validated_data["email"],
             phone_number=validated_data["phone_number"],
@@ -43,30 +59,55 @@ class LandlordRegistrationSerializer(serializers.Serializer):
 
         return user
 
+    def to_representation(self, instance):
+        return {
+            "id": instance.id,
+            "email": instance.email,
+            "phone_number": instance.phone_number,
+            "role": instance.role,
+            "message": "Landlord registered successfully"
+        }
 
 class TenantRegistrationSerializer(serializers.Serializer):
     email = serializers.EmailField()
     phone_number = serializers.CharField()
     password = serializers.CharField(write_only=True)
-    # CRITICAL FIX: Mark national_id as write_only here too
-    national_id = serializers.CharField(write_only=True)
-    id_front = serializers.ImageField()
-    id_back = serializers.ImageField()
+
+    national_id = serializers.CharField(
+        write_only=True
+    )
+
+    id_front = serializers.ImageField(
+        write_only=True
+    )
+
+    id_back = serializers.ImageField(
+        write_only=True
+    )
+
     profile_photo = serializers.ImageField(
-        required=False
+        required=False,
+        write_only=True
     )
 
     def validate_email(self, value):
         if User.objects.filter(email=value).exists():
-            raise serializers.ValidationError("Email already exists")
+            raise serializers.ValidationError(
+                "Email already exists"
+            )
         return value
 
     def validate_phone_number(self, value):
-        if User.objects.filter(phone_number=value).exists():
-            raise serializers.ValidationError("Phone number already exists")
+        if User.objects.filter(
+            phone_number=value
+        ).exists():
+            raise serializers.ValidationError(
+                "Phone number already exists"
+            )
         return value
 
     def create(self, validated_data):
+
         user = User.objects.create_user(
             email=validated_data["email"],
             phone_number=validated_data["phone_number"],
@@ -80,11 +121,22 @@ class TenantRegistrationSerializer(serializers.Serializer):
             id_front=validated_data["id_front"],
             id_back=validated_data["id_back"],
             profile_photo=validated_data.get(
-        "profile_photo"
-    )
-)
+                "profile_photo"
+            )
+        )
 
         return user
+
+    def to_representation(self, instance):
+        return {
+            "id": instance.id,
+            "email": instance.email,
+            "phone_number": instance.phone_number,
+            "role": instance.role,
+            "message": "Tenant registered successfully"
+        }
+
+
 
 
 class VerifyOTPSerializer(serializers.Serializer):

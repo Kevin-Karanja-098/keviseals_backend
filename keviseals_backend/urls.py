@@ -31,6 +31,11 @@ urlpatterns = [
     ),
 
     path(
+        "api/leases/",
+        include("leases.urls")
+    ),
+
+    path(
     "api/properties/",
     include("properties.urls")
     ),

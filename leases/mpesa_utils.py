@@ -54,7 +54,7 @@ def initiate_stk_push(
         "PhoneNumber": phone_number,
 
         "CallBackURL":
-        "https://your-domain.com/api/leases/payments/callback/",
+        "https://kevinkaranja098.pythonanywhere.com/api/leases/payments/callback/",
 
         "AccountReference":
         account_reference,

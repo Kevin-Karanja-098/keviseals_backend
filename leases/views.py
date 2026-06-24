@@ -81,7 +81,7 @@ class MyLeaseRequestsView(
         ).order_by(
             "-created_at"
         )
-    
+
 class LandlordLeaseRequestListView(
     generics.ListAPIView
 ):
@@ -108,7 +108,7 @@ class LandlordLeaseRequestListView(
         ).order_by(
             "-created_at"
         )
-    
+
 class ApproveLeaseRequestView(
     generics.UpdateAPIView
 ):
@@ -175,7 +175,7 @@ class ApproveLeaseRequestView(
                 lease.entry_code
             }
         )
-    
+
 class RejectLeaseRequestView(
     generics.UpdateAPIView
 ):
@@ -212,7 +212,7 @@ class RejectLeaseRequestView(
                 "Lease request rejected"
             }
         )
-    
+
 class InitiateLeaseRequestPaymentView(
     generics.CreateAPIView
 ):
@@ -250,6 +250,30 @@ class InitiateLeaseRequestPaymentView(
                 tenant=tenant
             )
         )
+
+        # Already fully paid
+        if (
+            lease_request.amount_paid
+            >=
+            lease_request.required_amount
+        ):
+            return Response(
+                {
+                    "error":
+                    "This lease request is already fully paid."
+                },
+                status=400
+            )
+
+        # Already approved
+        if lease_request.status == "APPROVED":
+            return Response(
+                {
+                    "error":
+                    "This lease request has already been approved."
+                },
+                status=400
+            )
 
         amount = (
             lease_request.required_amount
@@ -289,7 +313,6 @@ class InitiateLeaseRequestPaymentView(
         payment.save()
 
         return Response(result)
-    
 class InitiateLeaseWalletPaymentView(
     generics.CreateAPIView
 ):
@@ -297,6 +320,8 @@ class InitiateLeaseWalletPaymentView(
     permission_classes = [
         IsAuthenticated
     ]
+
+
 
     def create(
         self,
@@ -362,62 +387,124 @@ class InitiateLeaseWalletPaymentView(
         payment.save()
 
         return Response(result)
-    
-class MpesaCallbackView(
-    generics.CreateAPIView
-):
 
-    permission_classes = [
-        AllowAny
-    ]
+class MpesaCallbackView(generics.CreateAPIView):
 
-    def create(
-        self,
-        request,
-        *args,
-        **kwargs
-    ):
+    permission_classes = [AllowAny]
+
+    def create(self, request, *args, **kwargs):
+
+        print("=" * 50)
+        print("CALLBACK RECEIVED")
+        print(request.data)
+        print("=" * 50)
 
         body = request.data
 
-        callback = (
-            body["Body"]
-            ["stkCallback"]
+        callback_data = body.get(
+            "Body",
+            {}
+        ).get(
+            "stkCallback",
+            {}
         )
 
-        checkout_id = (
-            callback[
-                "CheckoutRequestID"
-            ]
+        checkout_id = callback_data.get(
+            "CheckoutRequestID"
         )
 
-        result_code = (
-            callback[
-                "ResultCode"
-            ]
+        result_code = callback_data.get(
+            "ResultCode"
         )
 
-        payment = (
-            Payment.objects.filter(
-                checkout_request_id=
-                checkout_id
-            ).first()
+        result_desc = callback_data.get(
+            "ResultDesc"
         )
+
+        print("CHECKOUT ID:", checkout_id)
+        print("RESULT CODE:", result_code)
+        print("RESULT DESC:", result_desc)
+
+        payment = Payment.objects.filter(
+            checkout_request_id=checkout_id
+        ).first()
+
+        print("PAYMENT FOUND:", payment)
 
         if not payment:
-
             return Response(
-                {"message":
-                 "Payment not found"}
+                {
+                    "error": "Payment not found"
+                },
+                status=status.HTTP_404_NOT_FOUND
             )
 
-        if str(result_code) != "0":
+        if str(result_code) == "0":
 
-            payment.status = "FAILED"
+            items = callback_data.get(
+                "CallbackMetadata",
+                {}
+            ).get(
+                "Item",
+                []
+            )
 
+            receipt_number = ""
+
+            for item in items:
+                if item.get("Name") == "MpesaReceiptNumber":
+                    receipt_number = item.get("Value")
+                    break
+
+            # Prevent duplicate callback crediting
+            if payment.status != "SUCCESS":
+
+                # Lease Request Payment
+                if payment.lease_request:
+
+                    payment.lease_request.amount_paid += payment.amount
+                    payment.lease_request.save()
+
+                    print(
+                        "LEASE REQUEST UPDATED:",
+                        payment.lease_request.amount_paid
+                    )
+
+                # Wallet Top Up Payment
+                if payment.lease:
+
+                    wallet = payment.lease.wallet
+
+                    wallet.available_credit += payment.amount
+                    wallet.save()
+
+                    print(
+                        "WALLET UPDATED:",
+                        wallet.available_credit
+                    )
+
+            payment.status = "SUCCESS"
+            payment.mpesa_receipt = receipt_number
             payment.save()
 
+            print("PAYMENT UPDATED TO SUCCESS")
+            print("RECEIPT:", receipt_number)
+
             return Response(
-                {"message":
-                 "Failed"}
+                {
+                    "message": "Payment successful"
+                },
+                status=status.HTTP_200_OK
             )
+
+        payment.status = "FAILED"
+        payment.save()
+
+        print("PAYMENT UPDATED TO FAILED")
+
+        return Response(
+            {
+                "message": "Payment failed"
+            },
+            status=status.HTTP_200_OK
+        )
