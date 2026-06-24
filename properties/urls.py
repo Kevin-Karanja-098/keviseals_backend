@@ -1,62 +1,88 @@
 from django.urls import path
-
 from .views import *
 
 urlpatterns = [
 
+    # PROPERTY
+
     path(
-        "create/",
+        "properties/create/",
         PropertyCreateView.as_view()
     ),
 
     path(
-        "my-properties/",
+        "properties/my/",
         MyPropertiesView.as_view()
     ),
 
     path(
-        "<int:pk>/",
+        "properties/<int:pk>/",
         PropertyDetailView.as_view()
     ),
 
     path(
-        "<int:pk>/update/",
+        "properties/<int:pk>/update/",
         PropertyUpdateView.as_view()
     ),
 
     path(
-        "<int:pk>/delete/",
+        "properties/<int:pk>/delete/",
         PropertyDeleteView.as_view()
     ),
 
+    # PROPERTY MEDIA
+
     path(
-        "media/upload/",
+        "properties/media/upload/",
         PropertyMediaUploadView.as_view()
     ),
 
     path(
-        "<int:property_id>/media/",
+        "properties/<int:property_id>/media/",
         PropertyMediaListView.as_view()
     ),
 
     path(
-        "media/<int:pk>/delete/",
+        "properties/media/<int:pk>/delete/",
         PropertyMediaDeleteView.as_view()
     ),
 
+    # PROPERTY RULES
+
     path(
-        "rules/create/",
+        "properties/rules/create/",
         PropertyRuleCreateView.as_view()
     ),
 
     path(
-        "<int:property_id>/rules/",
+        "properties/<int:property_id>/rules/",
         PropertyRuleListView.as_view()
     ),
 
-    path("create/", UnitCreateView.as_view()),
-    path("", UnitListView.as_view()),
-    path("<int:pk>/", UnitDetailView.as_view()),
-    path("<int:pk>/update/", UnitUpdateView.as_view()),
-    path("<int:pk>/delete/", UnitDeleteView.as_view()),
+    # UNITS
+
+    path(
+        "units/create/",
+        UnitCreateView.as_view()
+    ),
+
+    path(
+        "units/",
+        UnitListView.as_view()
+    ),
+
+    path(
+        "units/<int:pk>/",
+        UnitDetailView.as_view()
+    ),
+
+    path(
+        "units/<int:pk>/update/",
+        UnitUpdateView.as_view()
+    ),
+
+    path(
+        "units/<int:pk>/delete/",
+        UnitDeleteView.as_view()
+    ),
 ]
