@@ -1,5 +1,7 @@
 from django.db import models
 from accounts.models import LandlordProfile, TenantProfile
+from django.contrib.gis.db import models  # <-- CRITICAL: Use the GIS model layer!
+
 
 
 # Create your models here.
@@ -32,19 +34,7 @@ class Property(models.Model):
 
     address = models.TextField()
 
-    latitude = models.DecimalField(
-        max_digits=12,
-        decimal_places=8,
-        null=True,
-        blank=True
-    )
-
-    longitude = models.DecimalField(
-        max_digits=12,
-        decimal_places=8,
-        null=True,
-        blank=True
-    )
+    location = models.PointField(srid=4326, geography=True, null=True, blank=True)
 
     cover_image = models.ImageField(
         upload_to='properties/covers/',
@@ -68,7 +58,7 @@ class Property(models.Model):
 
     def __str__(self):
         return self.name
-    
+
 class PropertyMedia(models.Model):
 
     MEDIA_CHOICES = (
@@ -134,7 +124,7 @@ class Block(models.Model):
 
     def __str__(self):
         return self.name
-    
+
 class Unit(models.Model):
 
     STATUS_CHOICES = (
@@ -214,7 +204,7 @@ class Unit(models.Model):
 
     def __str__(self):
         return f"{self.property.name} - {self.unit_number}"
-    
+
 class UnitMedia(models.Model):
 
     MEDIA_CHOICES = (

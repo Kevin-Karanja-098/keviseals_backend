@@ -14,6 +14,26 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 import os
 from pathlib import Path
 
+import os
+
+# Check if running on Linux (PythonAnywhere Production Server)
+if os.name == 'nt':  # --- WINDOWS (LOCAL) ---
+    OSGEO4W_ROOT = Path(r"C:\Users\kevin\AppData\Local\Programs\OSGeo4W")
+    OSGEO4W_BIN = OSGEO4W_ROOT / 'bin'
+    os.environ['PATH'] = str(OSGEO4W_BIN) + os.pathsep + os.environ['PATH']
+    if hasattr(os, 'add_dll_directory') and OSGEO4W_BIN.exists():
+        os.add_dll_directory(str(OSGEO4W_BIN))
+
+    GDAL_LIBRARY_PATH = str(OSGEO4W_BIN / 'gdal313.dll')
+    GEOS_LIBRARY_PATH = str(OSGEO4W_BIN / 'geos_c.dll')
+    # Windows needs to find the spatialite extension module specifically:
+    SPATIALITE_LIBRARY_PATH = str(OSGEO4W_BIN / 'mod_spatialite.dll')
+
+else:  # --- LINUX (PYTHONANYWHERE PRODUCTION) ---
+    GDAL_LIBRARY_PATH = '/usr/local/lib/libgdal.so'
+    GEOS_LIBRARY_PATH = '/usr/lib/x86_64-linux-gnu/libgeos_c.so'
+    SPATIALITE_LIBRARY_PATH = '/usr/lib/x86_64-linux-gnu/mod_spatialite.so'
+
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -29,7 +49,7 @@ SECRET_KEY = 'django-insecure-f0y^3yg5(g0@-vv+-@#6mlwvh=v%id4#_5s6eb*f*(=vhu&&_0
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ['kevinkaranja098.pythonanywhere.com']
 
 
 # Application definition
@@ -48,15 +68,16 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt',
      'rest_framework_simplejwt.token_blacklist',
     'corsheaders',
+    'leaflet',
 
     # local
 
     'accounts',
-    
+
     'properties',
-    
+
     'leases',
-    
+
 ]
 
 MIDDLEWARE = [
@@ -103,7 +124,7 @@ REST_FRAMEWORK = {
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
+        'ENGINE': 'django.contrib.gis.db.backends.spatialite', # <-- Native SQLite GIS Engine
         'NAME': BASE_DIR / 'db.sqlite3',
     }
 }
@@ -152,6 +173,7 @@ EMAIL_HOST_PASSWORD = "pyrhpiifpsmoxuku"  # <-- your Gmail app password (no spac
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATIC_URL = 'static/'
+STATIC_ROOT = '/home/kevinkaranja098/keviseals_backend/static/'
 
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
