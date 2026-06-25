@@ -1,8 +1,10 @@
-from django.utils import timezone
 from decimal import Decimal
+from django.db import transaction
+from django.utils import timezone
 from rest_framework import generics, status
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.views import APIView
 
 from accounts.models import TenantProfile, LandlordProfile
 from accounts.permissions import IsLandlord
@@ -20,7 +22,6 @@ class LeaseRequestCreateView(generics.CreateAPIView):
     def perform_create(self, serializer):
         tenant = TenantProfile.objects.get(user=self.request.user)
         unit = Unit.objects.get(id=self.request.data.get("unit"))
-
         serializer.save(
             tenant=tenant,
             deposit_required=unit.deposit_amount,
@@ -50,32 +51,39 @@ class ApproveLeaseRequestView(generics.UpdateAPIView):
     permission_classes = [IsAuthenticated, IsLandlord]
     queryset = LeaseRequest.objects.all()
 
+    @transaction.atomic
     def update(self, request, *args, **kwargs):
         lease_request = self.get_object()
+
+        if lease_request.status == "APPROVED":
+            return Response({"error": "Lease request already approved."}, status=400)
+        if lease_request.status == "REJECTED":
+            return Response({"error": "Cannot approve a rejected lease request."}, status=400)
         if lease_request.amount_paid < lease_request.required_amount:
             return Response({"error": "Required payment not completed."}, status=400)
-
-        lease_request.status = "APPROVED"
-        lease_request.save()
+        if lease_request.unit.occupancy_status == "OCCUPIED":
+            return Response({"error": "This unit is already occupied."}, status=400)
+        if Lease.objects.filter(unit=lease_request.unit, status="ACTIVE").exists():
+            return Response({"error": "An active lease already exists for this unit."}, status=400)
 
         lease = Lease.objects.create(
             tenant=lease_request.tenant,
             unit=lease_request.unit,
             move_in_date=timezone.now().date(),
             entry_code=generate_entry_code(),
-            deposit_held=lease_request.deposit_required
+            deposit_held=lease_request.deposit_required,
+            status="ACTIVE"
         )
         create_lease_wallet(lease)
+        create_initial_rent_charge(lease, lease_request.rent_required)
 
+        lease_request.status = "APPROVED"
+        lease_request.save()
 
-        create_initial_rent_charge(
-            lease,
-            lease_request.rent_required
-        )
         lease_request.unit.occupancy_status = "OCCUPIED"
         lease_request.unit.save()
 
-        return Response({"message": "Lease approved", "entry_code": lease.entry_code})
+        return Response({"message": "Lease approved successfully.", "lease_id": lease.id, "entry_code": lease.entry_code})
 
 class RejectLeaseRequestView(generics.UpdateAPIView):
     serializer_class = LeaseRequestSerializer
@@ -131,42 +139,104 @@ class MpesaCallbackView(generics.CreateAPIView):
     permission_classes = [AllowAny]
 
     def create(self, request, *args, **kwargs):
-        print("=" * 50 + "\nCALLBACK RECEIVED\n" + str(request.data) + "\n" + "=" * 50)
+
         callback_data = request.data.get("Body", {}).get("stkCallback", {})
+
         checkout_id = callback_data.get("CheckoutRequestID")
         result_code = callback_data.get("ResultCode")
-        result_desc = callback_data.get("ResultDesc")
 
-        print(f"CHECKOUT ID: {checkout_id}\nRESULT CODE: {result_code}\nRESULT DESC: {result_desc}")
-        payment = Payment.objects.filter(checkout_request_id=checkout_id).first()
-        print("PAYMENT FOUND:", payment)
+        payment = Payment.objects.filter(
+            checkout_request_id=checkout_id
+        ).first()
 
         if not payment:
-            return Response({"error": "Payment not found"}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"error": "Payment not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
 
+        # Prevent duplicate callback processing
+        if payment.status == "SUCCESS":
+            return Response(
+                {"message": "Payment already processed"},
+                status=status.HTTP_200_OK
+            )
+
+        # Successful payment
         if str(result_code) == "0":
-            items = callback_data.get("CallbackMetadata", {}).get("Item", [])
-            receipt_number = next((item.get("Value") for item in items if item.get("Name") == "MpesaReceiptNumber"), "")
 
-            if payment.status != "SUCCESS":
-                if payment.lease_request:
-                    payment.lease_request.amount_paid += payment.amount
-                    payment.lease_request.save()
-                    print("LEASE REQUEST UPDATED:", payment.lease_request.amount_paid)
+            items = callback_data.get(
+                "CallbackMetadata",
+                {}
+            ).get(
+                "Item",
+                []
+            )
 
-                if payment.lease:
+            receipt_number = next(
+                (
+                    item.get("Value")
+                    for item in items
+                    if item.get("Name") == "MpesaReceiptNumber"
+                ),
+                ""
+            )
+
+            # Lease request payment
+            if payment.lease_request:
+
+                payment.lease_request.amount_paid += payment.amount
+                payment.lease_request.save()
+
+            # Existing tenant lease payment
+            if payment.lease:
+
+                remaining = apply_payment_to_charges(
+                    payment.lease,
+                    payment.amount
+                )
+
+                # Anything left goes into wallet
+                if remaining > 0:
+
                     wallet = payment.lease.wallet
-                    wallet.available_credit += payment.amount
+                    wallet.available_credit += remaining
                     wallet.save()
-                    print("WALLET UPDATED:", wallet.available_credit)
 
             payment.status = "SUCCESS"
             payment.mpesa_receipt = receipt_number
             payment.save()
-            print(f"PAYMENT UPDATED TO SUCCESS\nRECEIPT: {receipt_number}")
-            return Response({"message": "Payment successful"}, status=status.HTTP_200_OK)
 
+            return Response(
+                {"message": "Payment successful"},
+                status=status.HTTP_200_OK
+            )
+
+        # Failed payment
         payment.status = "FAILED"
         payment.save()
-        print("PAYMENT UPDATED TO FAILED")
-        return Response({"message": "Payment failed"}, status=status.HTTP_200_OK)
+
+        return Response(
+            {"message": "Payment failed"},
+            status=status.HTTP_200_OK
+        )
+
+
+class BillingCronView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+
+        token = request.headers.get("X-BILLING-TOKEN")
+
+        if token != settings.BILLING_CRON_TOKEN:
+            return Response(
+                {"error": "Unauthorized"},
+                status=403
+            )
+
+        generate_due_rent_charges()
+
+        return Response(
+            {"message": "Billing processed"}
+        )

@@ -27,6 +27,7 @@ class Lease(models.Model):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='ACTIVE')
     created_at = models.DateTimeField(auto_now_add=True)
     deposit_held = models.DecimalField(max_digits=12,decimal_places=2,default=0)
+    last_billing_date = models.DateTimeField(null=True,blank=True)
 
 class LeaseWallet(models.Model):
     lease = models.OneToOneField(Lease, on_delete=models.CASCADE, related_name='wallet')
@@ -38,11 +39,16 @@ class RentCharge(models.Model):
 
     lease = models.ForeignKey(Lease, on_delete=models.CASCADE, related_name='charges')
     billing_month = models.DateField()
+    due_date = models.DateField()
     rent_amount = models.DecimalField(max_digits=12, decimal_places=2)
     amount_paid = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     balance = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="UNPAID")
     created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["billing_month"]
+        #unique_together = ("lease", "billing_month")
 
 class MoveOutRequest(models.Model):
     STATUS_CHOICES = (('PENDING', 'Pending'), ('APPROVED', 'Approved'), ('REJECTED', 'Rejected'))

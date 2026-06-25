@@ -10,4 +10,5 @@ urlpatterns = [
     path("payments/lease-request/", InitiateLeaseRequestPaymentView.as_view()),
     path("payments/wallet/", InitiateLeaseWalletPaymentView.as_view()),
     path("payments/callback/", MpesaCallbackView.as_view()),
+    path("billing/process/",BillingCronView.as_view()),
 ]
