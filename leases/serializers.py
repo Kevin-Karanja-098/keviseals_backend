@@ -26,3 +26,14 @@ class RentChargeSerializer(serializers.ModelSerializer):
     class Meta:
         model = RentCharge
         fields = "__all__"
+
+class MoveOutRequestSerializer(serializers.ModelSerializer):
+
+    class Meta:
+        model = MoveOutRequest
+        fields = "__all__"
+        read_only_fields = (
+            "lease",
+            "status",
+            "landlord_notes",
+        )

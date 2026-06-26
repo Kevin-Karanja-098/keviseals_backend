@@ -115,7 +115,7 @@ AUTH_USER_MODEL = 'accounts.User'
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
-RENT_CYCLE_MINUTES = 1
+RENT_CYCLE_MINUTES = 43200
 
 BILLING_CRON_TOKEN = "9f4b7d2c8e1a5f6g3h9k7m2p4q8r1s6"
 

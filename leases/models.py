@@ -50,14 +50,6 @@ class RentCharge(models.Model):
         ordering = ["billing_month"]
         #unique_together = ("lease", "billing_month")
 
-class MoveOutRequest(models.Model):
-    STATUS_CHOICES = (('PENDING', 'Pending'), ('APPROVED', 'Approved'), ('REJECTED', 'Rejected'))
-
-    lease = models.ForeignKey(Lease, on_delete=models.CASCADE)
-    reason = models.TextField()
-    requested_date = models.DateField()
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING')
-    created_at = models.DateTimeField(auto_now_add=True)
 
 class Payment(models.Model):
     STATUS_CHOICES = (('PENDING', 'Pending'), ('SUCCESS', 'Success'), ('FAILED', 'Failed'))
@@ -73,3 +65,26 @@ class Payment(models.Model):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING')
     created_at = models.DateTimeField(auto_now_add=True)
     idempotency_key = models.UUIDField(unique=True, null=True, blank=True)
+
+
+class MoveOutRequest(models.Model):
+    STATUS_CHOICES = [
+        ("PENDING", "Pending"),
+        ("APPROVED", "Approved"),
+        ("REJECTED", "Rejected"),
+        ("CANCELLED", "Cancelled"),
+    ]
+
+    lease = models.ForeignKey(Lease, on_delete=models.CASCADE, related_name="move_out_requests")
+    reason = models.TextField()
+    requested_date = models.DateField()
+    landlord_notes = models.TextField(blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="PENDING")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.lease_id} - {self.status}"
