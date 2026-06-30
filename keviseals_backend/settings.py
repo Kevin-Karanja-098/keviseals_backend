@@ -17,22 +17,22 @@ from pathlib import Path
 import os
 
 # Check if running on Linux (PythonAnywhere Production Server)
-if os.name == 'nt':  # --- WINDOWS (LOCAL) ---
-    OSGEO4W_ROOT = Path(r"C:\Users\kevin\AppData\Local\Programs\OSGeo4W")
-    OSGEO4W_BIN = OSGEO4W_ROOT / 'bin'
-    os.environ['PATH'] = str(OSGEO4W_BIN) + os.pathsep + os.environ['PATH']
-    if hasattr(os, 'add_dll_directory') and OSGEO4W_BIN.exists():
-        os.add_dll_directory(str(OSGEO4W_BIN))
+# if os.name == 'nt':  # --- WINDOWS (LOCAL) ---
+#     OSGEO4W_ROOT = Path(r"C:\Users\kevin\AppData\Local\Programs\OSGeo4W")
+#     OSGEO4W_BIN = OSGEO4W_ROOT / 'bin'
+#     os.environ['PATH'] = str(OSGEO4W_BIN) + os.pathsep + os.environ['PATH']
+#     if hasattr(os, 'add_dll_directory') and OSGEO4W_BIN.exists():
+#         os.add_dll_directory(str(OSGEO4W_BIN))
 
-    GDAL_LIBRARY_PATH = str(OSGEO4W_BIN / 'gdal313.dll')
-    GEOS_LIBRARY_PATH = str(OSGEO4W_BIN / 'geos_c.dll')
-    # Windows needs to find the spatialite extension module specifically:
-    SPATIALITE_LIBRARY_PATH = str(OSGEO4W_BIN / 'mod_spatialite.dll')
+#     GDAL_LIBRARY_PATH = str(OSGEO4W_BIN / 'gdal313.dll')
+#     GEOS_LIBRARY_PATH = str(OSGEO4W_BIN / 'geos_c.dll')
+#     # Windows needs to find the spatialite extension module specifically:
+#     SPATIALITE_LIBRARY_PATH = str(OSGEO4W_BIN / 'mod_spatialite.dll')
 
-else:  # --- LINUX (PYTHONANYWHERE PRODUCTION) ---
-    GDAL_LIBRARY_PATH = '/usr/local/lib/libgdal.so'
-    GEOS_LIBRARY_PATH = '/usr/lib/x86_64-linux-gnu/libgeos_c.so'
-    SPATIALITE_LIBRARY_PATH = '/usr/lib/x86_64-linux-gnu/mod_spatialite.so'
+# else:  # --- LINUX (PYTHONANYWHERE PRODUCTION) ---
+#     GDAL_LIBRARY_PATH = '/usr/local/lib/libgdal.so'
+#     GEOS_LIBRARY_PATH = '/usr/lib/x86_64-linux-gnu/libgeos_c.so'
+#     SPATIALITE_LIBRARY_PATH = '/usr/lib/x86_64-linux-gnu/mod_spatialite.so'
 
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -49,12 +49,16 @@ SECRET_KEY = 'django-insecure-f0y^3yg5(g0@-vv+-@#6mlwvh=v%id4#_5s6eb*f*(=vhu&&_0
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['kevinkaranja098.pythonanywhere.com']
+ALLOWED_HOSTS = [ '*' ]
 
 
 # Application definition
 
 INSTALLED_APPS = [
+      "daphne",
+
+    "channels",
+
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -63,6 +67,8 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
 
      # third party
+
+    
 
     'rest_framework',
     'rest_framework_simplejwt',
@@ -78,7 +84,17 @@ INSTALLED_APPS = [
 
     'leases',
 
+     "chat",
+
 ]
+
+
+# settings.py
+
+# Allows external scripts like Leaflet tile servers to verify your domain name
+SECURE_REFERRER_POLICY = "strict-origin-when-cross-origin"
+
+LOGIN_URL = "/admin/login/"
 
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
@@ -91,6 +107,10 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
+
+CORS_ALLOW_ALL_ORIGINS = True
+
+CORS_ALLOW_CREDENTIALS = True
 
 ROOT_URLCONF = 'keviseals_backend.urls'
 
@@ -125,13 +145,34 @@ REST_FRAMEWORK = {
     ),
 }
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.contrib.gis.db.backends.spatialite', # <-- Native SQLite GIS Engine
-        'NAME': BASE_DIR / 'db.sqlite3',
-    }
+LEAFLET_CONFIG = {
+    'DEFAULT_CENTER': (-1.286389, 36.817223), # Example coordinates
+    'DEFAULT_ZOOM': 11,
+    'TILES': [
+        ('Clean Map', 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+            'attribution': '&copy; OpenStreetMap contributors &copy; CARTO',
+            'subdomains': 'abcd'
+        })
+    ]
 }
 
+# DATABASES = {
+#     'default': {
+#         'ENGINE': 'django.contrib.gis.db.backends.spatialite', # <-- Native SQLite GIS Engine
+#         'NAME': BASE_DIR / 'db.sqlite3',
+#     }
+# }
+
+DATABASES = {
+    "default": {
+        "ENGINE": "django.contrib.gis.db.backends.postgis",
+        "NAME": "keviseals_db",
+        "USER": "postgres",
+        "PASSWORD": "postgres",
+        "HOST": "postgres",
+        "PORT": "5432",
+    }
+}
 from datetime import timedelta
 
 SIMPLE_JWT = {
@@ -199,3 +240,15 @@ MEDIA_ROOT = BASE_DIR / "media"
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
+ASGI_APPLICATION = "keviseals_backend.asgi.application"
+
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "CONFIG": {
+            "hosts": [
+                "redis://redis:6379/0",
+            ],
+        },
+    },
+}

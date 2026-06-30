@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<title>Chat</title>
+
+</head>
+
+<body>
+
+<h2>
+
+Conversation {{ conversation.id }}
+
+</h2>
+
+<div id="messages">
+
+{% for message in messages %}
+
+<p>
+
+{{ message.sender.email }}
+
+:
+
+{{ message.body }}
+
+</p>
+
+{% endfor %}
+
+</div>
+
+<hr>
+
+<input
+type="text"
+id="message-input">
+
+<button id="send">
+
+Send
+
+</button>
+
+<script>
+
+const socket = new WebSocket(
+
+"ws://"
+
++
+
+window.location.host
+
++
+
+"/ws/chat/{{ conversation.id }}/"
+
+);
+
+socket.onmessage = function(e){
+
+const data = JSON.parse(e.data);
+
+document.getElementById("messages").innerHTML +=
+
+"<p>"+data.message+"</p>";
+
+};
+
+document.getElementById("send").onclick=function(){
+
+socket.send(
+
+JSON.stringify({
+
+message:
+
+document.getElementById("message-input").value
+
+})
+
+);
+
+document.getElementById("message-input").value="";
+
+};
+
+</script>
+
+</body>
+
+</html>
