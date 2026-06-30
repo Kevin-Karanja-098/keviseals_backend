@@ -22,4 +22,15 @@ urlpatterns = [
     path("move-out/<int:pk>/approve/", ApproveMoveOutRequestView.as_view()),
     path("move-out/<int:pk>/reject/", RejectMoveOutRequestView.as_view()),
     path("move-out/<int:pk>/cancel/", CancelMoveOutRequestView.as_view()),
+
+    path("inspections/create/", CreateInspectionView.as_view()),
+    path("inspections/<int:pk>/", InspectionDetailView.as_view()),
+    path("inspections/<int:pk>/complete/", CompleteInspectionView.as_view()),
+    path("inspection-items/create/", CreateInspectionItemView.as_view()),
+    path("settlements/<int:pk>/finalize/",FinalizeMoveOutView.as_view(),),
+
+    path("settlements/pay/",InitiateSettlementPaymentView.as_view()),
+    path("settlements/b2c/result/", B2CResultCallbackView.as_view(), name="b2c-result"),
+    path("settlements/b2c/timeout/", B2CQueueTimeoutView.as_view(), name="b2c-timeout"),
+    path("settlements/refund/",InitiateSettlementRefundView.as_view()),
 ]

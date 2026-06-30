@@ -115,7 +115,7 @@ AUTH_USER_MODEL = 'accounts.User'
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
-RENT_CYCLE_MINUTES = 43200
+RENT_CYCLE_MINUTES = 60
 
 BILLING_CRON_TOKEN = "9f4b7d2c8e1a5f6g3h9k7m2p4q8r1s6"
 
@@ -165,7 +165,8 @@ AUTH_PASSWORD_VALIDATORS = [
 # Internationalization
 # https://docs.djangoproject.com/en/5.2/topics/i18n/
 
-
+# DEVELOPMENT ONLY
+SIMULATE_B2C_SUCCESS = True
 
 LANGUAGE_CODE = 'en-us'
 
@@ -197,3 +198,4 @@ MEDIA_ROOT = BASE_DIR / "media"
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+

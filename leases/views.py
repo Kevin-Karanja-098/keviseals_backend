@@ -6,14 +6,14 @@ from rest_framework import generics, status, serializers
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.views import APIView
-
 from accounts.models import TenantProfile, LandlordProfile
 from accounts.permissions import IsLandlord
-from leases.mpesa_utils import initiate_stk_push
+from .mpesa_utils import *
 from properties.models import Unit
 from .models import *
 from .serializers import *
 from .services import *
+from django.conf import settings
 
 # --- LEASE REQUEST VIEWS ---
 
@@ -25,27 +25,19 @@ class LeaseRequestCreateView(generics.CreateAPIView):
         tenant = TenantProfile.objects.get(user=self.request.user)
         unit = Unit.objects.get(id=self.request.data.get("unit"))
         serializer.save(
-            tenant=tenant,
-            deposit_required=unit.deposit_amount,
-            rent_required=unit.monthly_rent,
-            required_amount=unit.deposit_amount + unit.monthly_rent,
-            amount_paid=0,
-            status="PAYMENT_PENDING"
+            tenant=tenant, deposit_required=unit.deposit_amount, rent_required=unit.monthly_rent,
+            required_amount=unit.deposit_amount + unit.monthly_rent, amount_paid=0, status="PAYMENT_PENDING"
         )
 
 class MyLeaseRequestsView(generics.ListAPIView):
     serializer_class = LeaseRequestSerializer
     permission_classes = [IsAuthenticated]
-
-    def get_queryset(self):
-        return LeaseRequest.objects.filter(tenant__user=self.request.user).order_by("-created_at")
+    get_queryset = lambda self: LeaseRequest.objects.filter(tenant__user=self.request.user).order_by("-created_at")
 
 class LandlordLeaseRequestListView(generics.ListAPIView):
     serializer_class = LeaseRequestSerializer
     permission_classes = [IsAuthenticated, IsLandlord]
-
-    def get_queryset(self):
-        return LeaseRequest.objects.filter(unit__property__landlord__user=self.request.user).order_by("-created_at")
+    get_queryset = lambda self: LeaseRequest.objects.filter(unit__property__landlord__user=self.request.user).order_by("-created_at")
 
 class ApproveLeaseRequestView(generics.UpdateAPIView):
     serializer_class = LeaseRequestSerializer
@@ -61,18 +53,12 @@ class ApproveLeaseRequestView(generics.UpdateAPIView):
         if lr.unit.occupancy_status == "OCCUPIED": return Response({"error": "This unit is already occupied."}, 400)
         if Lease.objects.filter(unit=lr.unit, status="ACTIVE").exists(): return Response({"error": "Active lease exists."}, 400)
 
-        lease = Lease.objects.create(
-            tenant=lr.tenant, unit=lr.unit, move_in_date=timezone.now().date(),
-            entry_code=generate_entry_code(), deposit_held=lr.deposit_required, status="ACTIVE"
-        )
+        lease = Lease.objects.create(tenant=lr.tenant, unit=lr.unit, move_in_date=timezone.now().date(), entry_code=generate_entry_code(), deposit_held=lr.deposit_required, status="ACTIVE")
         create_lease_wallet(lease)
         create_initial_rent_charge(lease, lr.rent_required)
 
-        lr.status = "APPROVED"
-        lr.save(update_fields=["status"])
-        lr.unit.occupancy_status = "OCCUPIED"
-        lr.unit.save(update_fields=["occupancy_status"])
-
+        lr.status, lr.unit.occupancy_status = "APPROVED", "OCCUPIED"
+        lr.save(update_fields=["status"]), lr.unit.save(update_fields=["occupancy_status"])
         return Response({"message": "Lease approved successfully.", "lease_id": lease.id, "entry_code": lease.entry_code})
 
 class RejectLeaseRequestView(generics.UpdateAPIView):
@@ -85,7 +71,6 @@ class RejectLeaseRequestView(generics.UpdateAPIView):
         lr.status = "REJECTED"
         lr.save(update_fields=["status"])
         return Response({"message": "Lease request rejected"})
-
 
 # --- MPESA & BILLING VIEWS ---
 
@@ -113,8 +98,7 @@ class InitiateLeaseWalletPaymentView(generics.CreateAPIView):
 
     def create(self, request, *args, **kwargs):
         tenant = TenantProfile.objects.get(user=request.user)
-        amount = Decimal(request.data.get("amount"))
-        phone = request.data.get("phone_number")
+        amount, phone = Decimal(request.data.get("amount")), request.data.get("phone_number")
         lease = Lease.objects.get(id=request.data.get("lease"), tenant=tenant)
 
         pay = Payment.objects.create(tenant=tenant, lease=lease, amount=amount, phone_number=phone, status="PENDING")
@@ -128,44 +112,47 @@ class MpesaCallbackView(generics.CreateAPIView):
     permission_classes = [AllowAny]
 
     def create(self, request, *args, **kwargs):
-        callback_data = request.data.get("Body", {}).get("stkCallback", {})
-        payment = Payment.objects.filter(checkout_request_id=callback_data.get("CheckoutRequestID")).first()
+        cb = request.data.get("Body", {}).get("stkCallback", {})
+        checkout_id, res_code = cb.get("CheckoutRequestID"), str(cb.get("ResultCode"))
 
-        if not payment: return Response({"error": "Payment not found"}, status=404)
-        if payment.status == "SUCCESS": return Response({"message": "Payment already processed"})
+        payment, st_tx = Payment.objects.filter(checkout_request_id=checkout_id).first(), SettlementTransaction.objects.filter(checkout_request_id=checkout_id).first()
+        if not payment and not st_tx: return Response({"error": "Transaction not found"}, 404)
 
-        if str(callback_data.get("ResultCode")) == "0":
-            items = callback_data.get("CallbackMetadata", {}).get("Item", [])
-            receipt = next((i.get("Value") for i in items if i.get("Name") == "MpesaReceiptNumber"), "")
+        if res_code != "0":
+            if payment: payment.status = "FAILED"; payment.save(update_fields=["status"])
+            if st_tx: st_tx.status = "FAILED"; st_tx.save(update_fields=["status"])
+            return Response({"message": "Payment failed"})
 
+        receipt = next((i.get("Value") for i in cb.get("CallbackMetadata", {}).get("Item", []) if i.get("Name") == "MpesaReceiptNumber"), "")
+
+        if payment:
+            if payment.status == "SUCCESS": return Response({"message": "Payment already processed"})
             if payment.lease_request:
                 payment.lease_request.amount_paid += payment.amount
                 payment.lease_request.save(update_fields=["amount_paid"])
-
-            if payment.lease:
-                remaining = apply_payment_to_charges(payment.lease, payment.amount)
-                if remaining > 0:
-                    wallet = payment.lease.wallet
-                    wallet.available_credit += remaining
-                    wallet.save(update_fields=["available_credit"])
-
+            elif payment.lease:
+                rem = apply_payment_to_charges(payment.lease, payment.amount)
+                if rem > 0:
+                    payment.lease.wallet.available_credit += rem
+                    payment.lease.wallet.save(update_fields=["available_credit"])
             payment.status, payment.mpesa_receipt = "SUCCESS", receipt
             payment.save(update_fields=["status", "mpesa_receipt"])
             return Response({"message": "Payment successful"})
 
-        payment.status = "FAILED"
-        payment.save(update_fields=["status"])
-        return Response({"message": "Payment failed"})
+        if st_tx:
+            if st_tx.status == "SUCCESS": return Response({"message": "Settlement already processed"})
+            st_tx.status, st_tx.mpesa_receipt = "SUCCESS", receipt
+            st_tx.save(update_fields=["status", "mpesa_receipt"])
+            reconcile_settlement(st_tx.settlement)
+            return Response({"message": "Settlement payment successful"})
 
 class BillingCronView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
-        if request.headers.get("X-BILLING-TOKEN") != settings.BILLING_CRON_TOKEN:
-            return Response({"error": "Unauthorized"}, status=403)
+        if request.headers.get("X-BILLING-TOKEN") != settings.BILLING_CRON_TOKEN: return Response({"error": "Unauthorized"}, 403)
         generate_due_rent_charges()
         return Response({"message": "Billing processed"})
-
 
 # --- MOVE OUT VIEWS ---
 
@@ -174,8 +161,11 @@ class CreateMoveOutRequestView(generics.CreateAPIView):
     permission_classes = [IsAuthenticated]
 
     def perform_create(self, serializer):
-        lease = Lease.objects.filter(tenant__user=self.request.user, status="ACTIVE").first()
-        if not lease: raise serializers.ValidationError("No active lease found.")
+        try:
+            lease = Lease.objects.get(id=self.request.data.get("lease"), tenant__user=self.request.user, status="ACTIVE")
+        except Lease.DoesNotExist:
+            raise serializers.ValidationError("Active lease not found.")
+
         if MoveOutRequest.objects.filter(lease=lease, status="PENDING").exists():
             raise serializers.ValidationError("You already have a pending move-out request.")
         serializer.save(lease=lease)
@@ -183,16 +173,12 @@ class CreateMoveOutRequestView(generics.CreateAPIView):
 class MyMoveOutRequestsView(generics.ListAPIView):
     serializer_class = MoveOutRequestSerializer
     permission_classes = [IsAuthenticated]
-
-    def get_queryset(self):
-        return MoveOutRequest.objects.filter(lease__tenant__user=self.request.user)
+    get_queryset = lambda self: MoveOutRequest.objects.filter(lease__tenant__user=self.request.user)
 
 class LandlordMoveOutRequestsView(generics.ListAPIView):
     serializer_class = MoveOutRequestSerializer
     permission_classes = [IsAuthenticated, IsLandlord]
-
-    def get_queryset(self):
-        return MoveOutRequest.objects.filter(lease__unit__property__landlord__user=self.request.user)
+    get_queryset = lambda self: MoveOutRequest.objects.filter(lease__unit__property__landlord__user=self.request.user)
 
 class ApproveMoveOutRequestView(generics.UpdateAPIView):
     queryset = MoveOutRequest.objects.all()
@@ -222,8 +208,250 @@ class CancelMoveOutRequestView(generics.UpdateAPIView):
 
     def update(self, request, *args, **kwargs):
         mo = self.get_object()
-        if mo.lease.tenant.user != request.user: return Response({"error": "You cannot cancel this request."}, status=403)
-        if mo.status != "PENDING": return Response({"error": "Only pending requests can be cancelled."}, status=400)
+        if mo.lease.tenant.user != request.user: return Response({"error": "You cannot cancel this request."}, 403)
+        if mo.status != "PENDING": return Response({"error": "Only pending requests can be cancelled."}, 400)
         mo.status = "CANCELLED"
         mo.save(update_fields=["status"])
         return Response({"message": "Move-out request cancelled successfully."})
+
+class CreateInspectionView(generics.CreateAPIView):
+    serializer_class = PropertyInspectionSerializer
+    permission_classes = [IsAuthenticated, IsLandlord]
+
+    def perform_create(self, serializer):
+        landlord = LandlordProfile.objects.get(user=self.request.user)
+        move_out = MoveOutRequest.objects.get(id=self.request.data.get("move_out_request"))
+        if move_out.status != "APPROVED": raise serializers.ValidationError("Move-out request must be approved.")
+        if hasattr(move_out, "inspection"): raise serializers.ValidationError("Inspection already exists.")
+        serializer.save(inspected_by=landlord, move_out_request=move_out)
+
+class CreateInspectionItemView(generics.CreateAPIView):
+    serializer_class = InspectionItemSerializer
+    permission_classes = [IsAuthenticated, IsLandlord]
+
+    def perform_create(self, serializer):
+        inspection = PropertyInspection.objects.get(id=self.request.data.get("inspection"))
+        if inspection.status == "COMPLETED": raise serializers.ValidationError("Inspection already completed.")
+        serializer.save(inspection=inspection)
+
+class InspectionDetailView(generics.RetrieveAPIView):
+    queryset = PropertyInspection.objects.all()
+    serializer_class = PropertyInspectionSerializer
+    permission_classes = [IsAuthenticated]
+
+class CompleteInspectionView(generics.UpdateAPIView):
+    queryset = PropertyInspection.objects.all()
+    permission_classes = [IsAuthenticated, IsLandlord]
+
+    def update(self, request, *args, **kwargs):
+        inspection = self.get_object()
+        inspection.status, inspection.general_notes = "COMPLETED", request.data.get("general_notes", "")
+        inspection.save(update_fields=["status", "general_notes"])
+        s = create_settlement(inspection)
+        return Response({
+            "message": "Inspection completed successfully.",
+            "settlement": {
+                "deposit_amount": s.deposit_amount, "wallet_credit": s.wallet_credit, "outstanding_rent": s.outstanding_rent,
+                "damage_cost": s.damage_cost, "refund_amount": s.refund_amount, "amount_owed": s.amount_owed, "status": s.status,
+            }
+        })
+
+class RecordSettlementPaymentView(generics.UpdateAPIView):
+    queryset = LeaseSettlement.objects.all()
+    permission_classes = [IsAuthenticated, IsLandlord]
+
+    def update(self, request, *args, **kwargs):
+        settlement, p_type, now = self.get_object(), request.data.get("payment_type"), timezone.now()
+        if p_type == "REFUND":
+            if settlement.refund_amount <= 0: return Response({"error": "There is no refund to pay."}, 400)
+            settlement.refund_paid, settlement.refund_paid_at = True, now
+        elif p_type == "BALANCE":
+            if settlement.amount_owed <= 0: return Response({"error": "Tenant owes nothing."}, 400)
+            settlement.balance_received, settlement.balance_received_at = True, now
+        else:
+            return Response({"error": "Invalid payment type."}, 400)
+
+        settlement.payment_notes = request.data.get("payment_notes", "")
+        settlement.save(update_fields=["refund_paid", "refund_paid_at", "balance_received", "balance_received_at", "payment_notes"])
+        return Response({"message": "Settlement payment recorded successfully."})
+
+class FinalizeMoveOutView(generics.UpdateAPIView):
+    queryset = LeaseSettlement.objects.all()
+    permission_classes = [IsAuthenticated, IsLandlord]
+
+    @transaction.atomic
+    def update(self, request, *args, **kwargs):
+        settlement = self.get_object()
+
+        if settlement.status == "FINALIZED":
+            return Response({"error": "Settlement already finalized."}, status=status.HTTP_400_BAD_REQUEST)
+        if settlement.refund_amount > 0 and not settlement.refund_paid:
+            return Response({"error": "The tenant refund has not yet been recorded as paid."}, status=status.HTTP_400_BAD_REQUEST)
+        if settlement.amount_owed > 0 and not settlement.balance_received:
+            return Response({"error": "The tenant's outstanding balance has not yet been recorded as received."}, status=status.HTTP_400_BAD_REQUEST)
+
+        now = timezone.now()
+        move_out = settlement.inspection.move_out_request
+        lease, unit = move_out.lease, move_out.lease.unit
+
+        settlement.status = "FINALIZED"
+        settlement.save(update_fields=["status"])
+
+        lease.status, lease.move_out_date, lease.entry_code = "COMPLETED", now.date(), None
+        lease.save(update_fields=["status", "move_out_date", "entry_code"])
+
+        unit.occupancy_status = "AVAILABLE"
+        unit.save(update_fields=["occupancy_status"])
+
+        move_out.completed_at = now
+        move_out.save(update_fields=["completed_at"])
+
+        return Response({
+            "message": "Move-out finalized successfully.",
+            "settlement": {k: getattr(settlement, k) for k in ["id", "status", "refund_amount", "refund_paid", "amount_owed", "balance_received"]},
+            "lease": {k: getattr(lease, k) for k in ["id", "status", "move_out_date", "entry_code"]},
+            "unit": {"id": unit.id, "occupancy_status": unit.occupancy_status},
+            "move_out_completed_at": move_out.completed_at,
+        }, status=status.HTTP_200_OK)
+
+class InitiateSettlementPaymentView(generics.CreateAPIView):
+    permission_classes = [IsAuthenticated]
+
+    def create(self, request, *args, **kwargs):
+        tenant = TenantProfile.objects.get(user=request.user)
+        settlement = LeaseSettlement.objects.get(id=request.data.get("settlement"), inspection__move_out_request__lease__tenant=tenant)
+
+        if settlement.status == "FINANCIALLY_SETTLED": return Response({"error": "Settlement is already settled."}, 400)
+        if settlement.amount_owed <= 0: return Response({"error": "Nothing to pay."}, 400)
+
+        remaining = settlement.amount_owed - (SettlementTransaction.objects.filter(settlement=settlement, transaction_type="COLLECTION", status="SUCCESS").aggregate(t=Sum("amount"))["t"] or Decimal("0.00"))
+        if remaining <= 0:
+            reconcile_settlement(settlement)
+            return Response({"message": "Settlement already paid."})
+
+        phone = request.data.get("phone_number")
+        tx = SettlementTransaction.objects.create(settlement=settlement, transaction_type="COLLECTION", payment_method="MPESA_STK", amount=remaining, phone_number=phone, status="PENDING")
+        res = initiate_stk_push(phone_number=phone, amount=remaining, account_reference=f"SETTLEMENT-{settlement.id}")
+
+        tx.checkout_request_id, tx.merchant_request_id = res.get("CheckoutRequestID", ""), res.get("MerchantRequestID", "")
+        tx.save(update_fields=["checkout_request_id", "merchant_request_id"])
+        return Response(res)
+
+class InitiateSettlementRefundView(generics.CreateAPIView):
+    permission_classes = [IsAuthenticated, IsLandlord]
+
+    def create(self, request, *args, **kwargs):
+        landlord = LandlordProfile.objects.get(user=request.user)
+        settlement = LeaseSettlement.objects.get(id=request.data.get("settlement"), inspection__move_out_request__lease__unit__property__landlord=landlord)
+
+        if settlement.status == "FINALIZED": return Response({"error": "Settlement already finalized."}, status=400)
+        if settlement.refund_amount <= 0: return Response({"error": "Tenant is not owed any refund."}, status=400)
+        if settlement.refund_paid: return Response({"error": "Refund already completed."}, status=400)
+
+        remaining = settlement.refund_amount - (SettlementTransaction.objects.filter(settlement=settlement, transaction_type="REFUND", status="SUCCESS").aggregate(total=Sum("amount"))["total"] or Decimal("0.00"))
+        if remaining <= 0:
+            reconcile_settlement(settlement)
+            return Response({"message": "Refund already completed."})
+
+        phone = phone = settlement.inspection.move_out_request.lease.tenant.user.phone_number
+        tx = SettlementTransaction.objects.create(settlement=settlement, transaction_type="REFUND", payment_method="MPESA_B2C", amount=remaining, phone_number=phone, status="PENDING")
+        response = initiate_b2c_payment(phone_number=phone, amount=remaining, remarks=f"Refund Settlement {settlement.id}", occasion="Tenant Refund")
+        print("B2C RESPONSE:", response)
+
+        tx.conversation_id, tx.originator_conversation_id = response.get("ConversationID", ""), response.get("OriginatorConversationID", "")
+        print("Conversation:", tx.conversation_id)
+        print("Originator:", tx.originator_conversation_id)
+        tx.save(update_fields=["conversation_id", "originator_conversation_id"])
+        tx.refresh_from_db()
+        print("Saved Conversation:", tx.conversation_id)
+        print("Saved Originator:", tx.originator_conversation_id)
+        return Response(response)
+
+class B2CQueueTimeoutView(generics.CreateAPIView):
+    permission_classes = [AllowAny]
+
+    def create(self, request, *args, **kwargs):
+        tx = SettlementTransaction.objects.filter(conversation_id=request.data.get("ConversationID", "")).first()
+        if tx:
+            tx.status, tx.result_desc = "FAILED", "Queue timeout."
+            tx.save(update_fields=["status", "result_desc"])
+        return Response({"message": "Timeout received."}, status=200)
+
+class B2CResultCallbackView(generics.CreateAPIView):
+    permission_classes = [AllowAny]
+
+    @transaction.atomic
+    def create(self, request, *args, **kwargs):
+
+        res = request.data.get("Result", {})
+
+        tx = SettlementTransaction.objects.filter(
+            conversation_id=res.get("ConversationID")
+        ).select_related("settlement").first()
+
+        if not tx:
+            return Response(
+                {"error": "Transaction not found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        if tx.status == "SUCCESS":
+            return Response(
+                {"message": "Refund already processed."},
+                status=status.HTTP_200_OK
+            )
+
+        tx.result_code = str(res.get("ResultCode", ""))
+        tx.result_desc = res.get("ResultDesc", "")
+
+        simulate_success = (
+            settings.SIMULATE_B2C_SUCCESS
+            and tx.result_desc == "The security credential is locked."
+        )
+
+        if tx.result_code == "0" or simulate_success:
+
+            tx.status = "SUCCESS"
+            tx.save(update_fields=[
+                "status",
+                "result_code",
+                "result_desc",
+            ])
+
+            settlement = tx.settlement
+
+            settlement.refund_paid = True
+            settlement.refund_paid_at = timezone.now()
+
+            settlement.save(update_fields=[
+                "refund_paid",
+                "refund_paid_at",
+            ])
+
+            reconcile_settlement(settlement)
+
+            return Response(
+                {
+                    "message": "Refund completed successfully.",
+                    "simulated": simulate_success,
+                    "settlement_status": settlement.status
+                },
+                status=status.HTTP_200_OK
+            )
+
+        tx.status = "FAILED"
+
+        tx.save(update_fields=[
+            "status",
+            "result_code",
+            "result_desc",
+        ])
+
+        return Response(
+            {
+                "message": "Refund failed.",
+                "reason": tx.result_desc,
+                "result_code": tx.result_code,
+            },
+            status=status.HTTP_200_OK
+        )

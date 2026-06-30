@@ -37,3 +37,31 @@ class MoveOutRequestSerializer(serializers.ModelSerializer):
             "status",
             "landlord_notes",
         )
+
+class InspectionItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = InspectionItem
+        fields = "__all__"
+
+
+class PropertyInspectionSerializer(serializers.ModelSerializer):
+    total_damage = serializers.ReadOnlyField()
+    items = InspectionItemSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = PropertyInspection
+        fields = "__all__"
+        read_only_fields = (
+            "inspected_by",
+            "move_out_request",
+            "status",
+            "general_notes",
+            "created_at",
+            "total_damage",
+        )
+
+class SettlementTransactionSerializer(serializers.ModelSerializer):
+
+    class Meta:
+        model = SettlementTransaction
+        fields = "__all__"
