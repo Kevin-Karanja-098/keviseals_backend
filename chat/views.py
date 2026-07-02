@@ -5,6 +5,8 @@ from django.db.models import Q
 from rest_framework.decorators import api_view, permission_classes, parser_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser
+
+from notifications.models import Notification
 from .models import Message
 
 User = get_user_model()
@@ -58,6 +60,13 @@ def fetch_chat_history_api(request, other_user_id):
         sender_id=other_user_id,
         receiver=request.user,
         is_read=False
+    ).update(is_read=True)
+
+    Notification.objects.filter(
+        recipient=request.user,
+        notification_type="chat",
+        is_read=False,
+        data__sender_id=other_user_id
     ).update(is_read=True)
 
     # Query full bidirectional historical logs

@@ -22,3 +22,5 @@ geopy==2.4.1
 gunicorn==23.0.0
 
 reportlab==4.2.5
+
+firebase-admin==6.3.0

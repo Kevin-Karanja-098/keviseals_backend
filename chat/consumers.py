@@ -4,8 +4,11 @@ from channels.db import database_sync_to_async
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from .models import Message
+from notifications.services import send_chat_notification
+from notifications.models import Notification
 
 User = get_user_model()
+
 
 class ChatConsumer(AsyncWebsocketConsumer):
     async def connect(self):
@@ -25,6 +28,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
         await self.channel_layer.group_add(self.presence_group_name, self.channel_name)
         
         await self.accept()
+        await self.set_active_chat()
 
         # Update active chat connections tracker
         current_count = await self.increment_connection()
@@ -41,6 +45,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
             
         await self.channel_layer.group_discard(self.room_group_name, self.channel_name)
         await self.channel_layer.group_discard(self.presence_group_name, self.channel_name)
+        await self.clear_active_chat()
 
     async def receive(self, text_data):
         data = json.loads(text_data)
@@ -103,7 +108,9 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 file_type=data.get("file_type"),
                 file_url=data.get("file_url")
             )
-            
+            await database_sync_to_async(
+                    send_chat_notification
+                )(msg_obj)
             await self.channel_layer.group_send(
                 self.room_group_name,
                 {
@@ -204,9 +211,40 @@ class ChatConsumer(AsyncWebsocketConsumer):
     def soft_delete_message(self, message_id):
         Message.objects.filter(id=message_id, sender=self.user).update(is_deleted=True)
 
+
     @database_sync_to_async
     def mark_messages_as_read(self):
-        recipient_id = int(self.target_id)
+        sender_id = int(self.target_id)
+
+        # Mark chat messages as read
         Message.objects.filter(
-            sender_id=recipient_id, receiver=self.user, is_read=False
+            sender_id=sender_id,
+            receiver=self.user,
+            is_read=False
         ).update(is_read=True)
+
+        # Mark chat notifications as read
+        Notification.objects.filter(
+            recipient=self.user,
+            notification_type="chat",
+            is_read=False,
+            data__sender_id=sender_id
+        ).update(is_read=True)
+
+    @database_sync_to_async
+    def set_active_chat(self):
+        cache.set(
+            f"user_active_chat_{self.user.id}",
+            int(self.target_id),
+            timeout=None,
+        )
+
+
+    @database_sync_to_async
+    def clear_active_chat(self):
+        key = f"user_active_chat_{self.user.id}"
+
+        current = cache.get(key)
+
+        if current == int(self.target_id):
+            cache.delete(key)

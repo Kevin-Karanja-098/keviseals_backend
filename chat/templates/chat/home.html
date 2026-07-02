@@ -24,7 +24,10 @@
         /* 2. Dashboard Interface Styling */
         #dashboard-view { display: grid; grid-template-columns: 320px 1fr; width: 100vw; height: 100vh; background: #fff; }
         #sidebar { background: #ffffff; border-right: 1px solid #e0e0e0; display: flex; flex-direction: column; }
-        #current-user { padding: 20px; background: #00A651; color: white; font-weight: bold; font-size: 0.95rem; }
+        #current-user { padding: 15px 20px; background: #00A651; color: white; display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+        .user-info-text { font-weight: bold; font-size: 0.95rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .logout-btn { padding: 6px 12px; background: #e53e3e; color: white; border: none; border-radius: 4px; font-size: 0.8rem; font-weight: bold; cursor: pointer; transition: background 0.2s; }
+        .logout-btn:hover { background: #c53030; }
         #user-list { list-style: none; overflow-y: auto; flex: 1; }
         
         /* Sidebar User Row Upgrades */
@@ -70,7 +73,7 @@
         /* Input Controls */
         #input-area { padding: 20px; background: #ffffff; border-top: 1px solid #e0e0e0; display: flex; gap: 10px; align-items: center; }
         #message-input { flex: 1; padding: 12px; border: 1px solid #ccc; border-radius: 4px; outline: none; }
-        .attach-icon-btn { font-size: 1.3rem; cursor: pointer; padding: 4px; opacity: 0.7; transition: opacity 0.2s; }
+        .attach-icon-btn { font-size: 1.3rem; cursor: pointer; padding: 4px; opacity: 0.7; transition: opacity 0.2s; user-select: none; }
         .attach-icon-btn:hover { opacity: 1; }
         #file-uploader { display: none; }
         
@@ -99,7 +102,10 @@
 
 <div id="dashboard-view" class="hidden">
     <div id="sidebar">
-        <div id="current-user">Logged in as: <span id="my-email-display">...</span></div>
+        <div id="current-user">
+            <div class="user-info-text">User: <span id="my-email-display">...</span></div>
+            <button id="logout-action-btn" class="logout-btn" onclick="performLogout()">Logout</button>
+        </div>
         <ul id="user-list"></ul>
     </div>
     <div id="main-chat">
@@ -115,18 +121,36 @@
                 <input type="file" id="file-uploader" accept="image/*,application/pdf,.doc,.docx,.xls,.xlsx">
                 
                 <input type="text" id="message-input" placeholder="Type your message here or paste screenshot directly..." autocomplete="off">
-                <button id="send-btn" class="btn" style="width:auto; margin-top:0; padding: 0 24px;">Send</button>
+                <button id="send-btn" type="button" class="btn" style="width:auto; margin-top:0; padding: 0 24px;">Send</button>
             </div>
         </div>
     </div>
 </div>
 
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-messaging-compat.js"></script>
+
 <script>
-    let accessToken = null;
+    // Initialize Firebase Core Engine Configuration
+    const firebaseConfig = {
+        apiKey: "AIzaSyCfAJLC-pHvyVQylFIHoar5S9UrfzdxOoM",
+        authDomain: "realchatkevtech.firebaseapp.com",
+        projectId: "realchatkevtech",
+        storageBucket: "realchatkevtech.firebasestorage.app",
+        messagingSenderId: "1014431201308",
+        appId: "1:1014431201308:web:8ce87def13bc97253607d9",
+        measurementId: "G-PJ08TZ3TKT"
+    };
+
+    // Instantiate and fetch standard Messaging module
+    firebase.initializeApp(firebaseConfig);
+    const messaging = firebase.messaging();
+
+    let accessToken = localStorage.getItem('accessToken') || null;
+    let myEmail = localStorage.getItem('myEmail') || null;
+    let myId = localStorage.getItem('myId') || null;
     let currentSocket = null;
     let activeRecipientId = null;
-    let myEmail = null;
-    let myId = null;
     let typingTimer = null;
 
     function parseJwtUser(token) {
@@ -135,6 +159,21 @@
             const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
             return JSON.parse(window.atob(base64));
         } catch(e) { return null; }
+    }
+
+    // Checking authentication engine status on page access
+    window.addEventListener('DOMContentLoaded', () => {
+        if (accessToken && myEmail && myId) {
+            setupAuthenticatedView();
+        }
+    });
+
+    function setupAuthenticatedView() {
+        document.getElementById('login-wrapper-container').classList.add('hidden');
+        document.getElementById('dashboard-view').classList.remove('hidden');
+        document.getElementById('my-email-display').innerText = myEmail;
+        loadUsers();
+        registerForPushNotifications();
     }
 
     // 1. Intercept Form Login Processing
@@ -158,11 +197,12 @@
                 myEmail = email;
                 myId = parseJwtUser(accessToken)?.user_id;
 
-                document.getElementById('login-wrapper-container').classList.add('hidden');
-                document.getElementById('dashboard-view').classList.remove('hidden');
-                document.getElementById('my-email-display').innerText = myEmail;
+                // Persist credentials locally across standard view mutations
+                localStorage.setItem('accessToken', accessToken);
+                localStorage.setItem('myEmail', myEmail);
+                localStorage.setItem('myId', myId);
 
-                loadUsers();
+                setupAuthenticatedView();
             } else {
                 errorBox.innerText = data.error || "Authentication verification failed.";
                 errorBox.classList.remove('hidden');
@@ -173,36 +213,88 @@
         }
     };
 
+    // Calls the Django endpoint to clean device configurations, then kills browser storage
+    async function performLogout() {
+        const cachedFcmToken = localStorage.getItem('fcmToken');
+        
+        if (cachedFcmToken && accessToken) {
+            try {
+                // Trigger backend to drop device out of user records safely
+                await fetch('http://localhost:8000/api/notifications/remove-device/', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${accessToken}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ fcm_token: cachedFcmToken })
+                });
+                console.log("Device unlinked successfully from system records.");
+            } catch (err) {
+                console.error("Failed to cleanly invoke remote device removal endpoint:", err);
+            }
+        }
+
+        localStorage.clear();
+        accessToken = null;
+        myEmail = null;
+        myId = null;
+        activeRecipientId = null;
+
+        if (currentSocket) {
+            currentSocket.close();
+            currentSocket = null;
+        }
+
+        // Reset display wrappers
+        document.getElementById('dashboard-view').classList.add('hidden');
+        document.getElementById('login-wrapper-container').classList.remove('hidden');
+        document.getElementById('login-form').reset();
+        
+        // Return views to generic neutral states
+        document.getElementById('active-chat-structure').style.display = 'none';
+        document.getElementById('placeholder-view').classList.remove('hidden');
+        document.getElementById('user-list').innerHTML = '';
+        document.getElementById('messages-box').innerHTML = '';
+    }
+
     // 2. Fetch Users List with Unread Count & Presence Metadata Status
     async function loadUsers() {
-        const response = await fetch('http://localhost:8000/api/chat/api/users/', {
-            headers: { 'Authorization': `Bearer ${accessToken}` }
-        });
-        const data = await response.json();
-        const listEl = document.getElementById('user-list');
-        listEl.innerHTML = '';
+        try {
+            const response = await fetch('http://localhost:8000/api/chat/api/users/', {
+                headers: { 'Authorization': `Bearer ${accessToken}` }
+            });
+            if (response.status === 401) {
+                performLogout();
+                return;
+            }
+            const data = await response.json();
+            const listEl = document.getElementById('user-list');
+            listEl.innerHTML = '';
 
-        data.users.forEach(u => {
-            const li = document.createElement('li');
-            const unreadCount = parseInt(u.unread_count || 0);
-            li.className = 'user-item';
-            li.id = `user-row-${u.id}`;
-            
-            li.innerHTML = `
-                <div class="user-meta-box">
-                    <div class="user-details">
-                        <strong>${u.email}</strong>
-                        <span class="user-role">${u.role || 'User'}</span>
-                        <div class="user-presence-container">
-                            <span class="status-badge" id="presence-${u.id}"></span>
+            data.users.forEach(u => {
+                const li = document.createElement('li');
+                const unreadCount = parseInt(u.unread_count || 0);
+                li.className = 'user-item';
+                li.id = `user-row-${u.id}`;
+                
+                li.innerHTML = `
+                    <div class="user-meta-box">
+                        <div class="user-details">
+                            <strong>${u.email}</strong>
+                            <span class="user-role">${u.role || 'User'}</span>
+                            <div class="user-presence-container">
+                                <span class="status-badge" id="presence-${u.id}"></span>
+                            </div>
                         </div>
                     </div>
-                </div>
-                <span class="unread-count ${unreadCount > 0 ? '' : 'hidden'}" id="unread-badge-${u.id}">${unreadCount}</span>
-            `;
-            li.onclick = () => switchChatRoom(u.id, u.email, li);
-            listEl.appendChild(li);
-        });
+                    <span class="unread-count ${unreadCount > 0 ? '' : 'hidden'}" id="unread-badge-${u.id}">${unreadCount}</span>
+                `;
+                li.onclick = () => switchChatRoom(u.id, u.email, li);
+                listEl.appendChild(li);
+            });
+        } catch (err) {
+            console.error("Failed to load users correctly:", err);
+        }
     }
 
     // 3. Switch Chat Rooms, Load History, and Clear Counts
@@ -240,7 +332,7 @@
     // 4. Connect WebSockets with Advanced Multi-Action Pipeline listeners
     function initializeWebSocket(targetId) {
         const wsScheme = window.location.protocol === "https:" ? "wss" : "ws";
-        const currentHost = (window.location.host === "ws" || !window.location.host) ? "localhost:8000" : window.location.host;
+        const currentHost = "localhost:8000"; 
         const wsUrl = `${wsScheme}://${currentHost}/ws/chat/${targetId}/?token=${accessToken}`;
         
         currentSocket = new WebSocket(wsUrl);
@@ -280,7 +372,6 @@
             } 
             else if (data.action === "read_receipt") {
                 if (String(data.reader_id) === String(activeRecipientId)) {
-                    // FIX: Make live double-ticks stand out inside the dark green bubble (using light blue)
                     document.querySelectorAll('.msg.sent .seen-indicator').forEach(el => {
                         el.innerText = "✓✓ Read";
                         el.style.color = "#ccfffd"; 
@@ -310,7 +401,6 @@
                 }
             } 
             else {
-                // Core Text or Attachment Influx Message
                 if (String(data.sender_id) === String(activeRecipientId) || String(data.sender_id) === String(myId)) {
                     appendMessageBubble(data);
                     scrollToBottom();
@@ -332,7 +422,6 @@
     // 5. Build, Render, and Update Message Elements
     function appendMessageBubble(msg) {
         const msgBox = document.getElementById('messages-box');
-        
         if (document.getElementById(`msg-container-${msg.id}`)) return;
 
         const bubble = document.createElement('div');
@@ -344,13 +433,12 @@
         const textContent = msg.message || msg.content || "";
         const timestampDisplay = msg.timestamp || new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
         
-        // FIX: High contrast colors so text ticks can actually be seen clearly over green and grey backgrounds
         let tickMarkup = "✓";
-        let tickColor = "rgba(255, 255, 255, 0.6)"; // Default single tick on sent messages
+        let tickColor = "rgba(255, 255, 255, 0.6)"; 
         
         if (msg.is_read) {
             tickMarkup = "✓✓ Read";
-            tickColor = isMe ? "#ccfffd" : "inherit"; // Light Blue highlight over green background
+            tickColor = isMe ? "#ccfffd" : "inherit"; 
         } else if (isMe) {
             tickMarkup = "✓ Sent";
         }
@@ -441,7 +529,6 @@
         }
     }
 
-    // Helper Function to safely encapsulate backend multi-part file routing logic
     async function uploadAndSendFile(file) {
         if (!file || !activeRecipientId) return;
 
@@ -470,8 +557,49 @@
         }
     }
 
-    // Direct interaction tracking listener for file uploader widget
+    // 7. Push Notification Registration Logic (FCM Token System)
+    async function registerForPushNotifications() {
+        try {
+            const permission = await Notification.requestPermission();
+            if (permission !== "granted") {
+                console.warn("Notification permission denied.");
+                return;
+            }
+
+            const registration = await navigator.serviceWorker.register("/firebase-messaging-sw.js");
+            console.log("Service Worker registered:", registration);
+
+            const token = await messaging.getToken({
+                vapidKey: "BA46HXDzStRKq11Lgf3ghc9T3AxmhuA_zVEO8JLw2gcMDOGJw4lQmXlWFT8_AQd0NpMAaP9NmisWODHF3XXtFiw",
+                serviceWorkerRegistration: registration
+            });
+
+            console.log("FCM Token:", token);
+            if (!token) return;
+
+            // Cache token locally to pull down during logouts
+            localStorage.setItem('fcmToken', token);
+
+            await fetch("http://localhost:8000/api/notifications/register-device/", {
+                method: "POST",
+                headers: {
+                    "Authorization": `Bearer ${accessToken}`,
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    fcm_token: token,
+                    platform: "web",
+                    device_name: navigator.userAgent
+                })
+            });
+        } catch (pushError) {
+            console.error("FCM Registration Error:", pushError);
+        }
+    }
+
+    // FIXED: Form element intercept logic for direct async handler routines
     document.getElementById('file-uploader').onchange = async function(e) {
+        e.preventDefault(); // Safety check against bubble submit behavior
         const file = e.target.files[0];
         if (file) {
             await uploadAndSendFile(file);
@@ -479,7 +607,6 @@
         e.target.value = ''; 
     };
 
-    // Screenshot/Clipboard image intercept pipeline
     window.addEventListener('paste', async function(e) {
         if (!activeRecipientId) return;
 
@@ -501,9 +628,15 @@
     });
 
     document.addEventListener('click', () => document.querySelectorAll('.msg-menu').forEach(m => m.style.display = 'none'));
-
     document.getElementById('send-btn').onclick = sendMessage;
-    document.getElementById('message-input').onkeypress = function(e) { if (e.key === 'Enter') sendMessage(); };
+    
+    // FIXED: Ensured execution drops tracking context and halts bubble propagation
+    document.getElementById('message-input').onkeypress = function(e) { 
+        if (e.key === 'Enter') {
+            e.preventDefault(); 
+            sendMessage(); 
+        } 
+    };
     function scrollToBottom() { const box = document.getElementById('messages-box'); box.scrollTop = box.scrollHeight; }
 </script>
 </body>
