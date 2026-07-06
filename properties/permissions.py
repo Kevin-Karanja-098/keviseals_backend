@@ -37,6 +37,6 @@ class IsActiveLandlord(BasePermission):
 
         return (
             profile.status == "APPROVED"
-            and contract
-            and contract.status == "APPROVED"
+            # and contract
+            # and contract.status == "APPROVED"
         )

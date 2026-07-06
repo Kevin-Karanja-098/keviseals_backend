@@ -1,3 +1,4 @@
+import django
 from django.shortcuts import render
 from django.contrib.auth import get_user_model
 from django.http import JsonResponse
@@ -12,9 +13,15 @@ from .models import Message
 User = get_user_model()
 
 def single_page_chat_view(request):
-    """Renders the unified login + chat interface wrapper."""
-    return render(request, "chat/index.html")
+    return render(request, "chat/home.html")
 
+from django.http import FileResponse
+from django.conf import settings
+import os
+
+def firebase_sw(request):
+    path = os.path.join(settings.BASE_DIR, "firebase-messaging-sw.js")
+    return FileResponse(open(path, "rb"), content_type="application/javascript")
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -138,3 +145,8 @@ def upload_file_attachment(request):
         "file_type": msg.file_type,
         "timestamp": msg.timestamp.strftime("%H:%M")
     })
+
+from django.shortcuts import render
+
+def home(request):
+    return render(request, "chat/home.html")

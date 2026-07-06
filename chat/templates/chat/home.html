@@ -73,7 +73,7 @@
         /* Input Controls */
         #input-area { padding: 20px; background: #ffffff; border-top: 1px solid #e0e0e0; display: flex; gap: 10px; align-items: center; }
         #message-input { flex: 1; padding: 12px; border: 1px solid #ccc; border-radius: 4px; outline: none; }
-        .attach-icon-btn { font-size: 1.3rem; cursor: pointer; padding: 4px; opacity: 0.7; transition: opacity 0.2s; user-select: none; }
+        .attach-icon-btn { font-size: 1.3rem; cursor: pointer; padding: 4px; opacity: 0.7; transition: opacity 0.2s; }
         .attach-icon-btn:hover { opacity: 1; }
         #file-uploader { display: none; }
         
@@ -121,7 +121,7 @@
                 <input type="file" id="file-uploader" accept="image/*,application/pdf,.doc,.docx,.xls,.xlsx">
                 
                 <input type="text" id="message-input" placeholder="Type your message here or paste screenshot directly..." autocomplete="off">
-                <button id="send-btn" type="button" class="btn" style="width:auto; margin-top:0; padding: 0 24px;">Send</button>
+                <button id="send-btn" class="btn" style="width:auto; margin-top:0; padding: 0 24px;">Send</button>
             </div>
         </div>
     </div>
@@ -597,9 +597,7 @@
         }
     }
 
-    // FIXED: Form element intercept logic for direct async handler routines
     document.getElementById('file-uploader').onchange = async function(e) {
-        e.preventDefault(); // Safety check against bubble submit behavior
         const file = e.target.files[0];
         if (file) {
             await uploadAndSendFile(file);
@@ -629,14 +627,7 @@
 
     document.addEventListener('click', () => document.querySelectorAll('.msg-menu').forEach(m => m.style.display = 'none'));
     document.getElementById('send-btn').onclick = sendMessage;
-    
-    // FIXED: Ensured execution drops tracking context and halts bubble propagation
-    document.getElementById('message-input').onkeypress = function(e) { 
-        if (e.key === 'Enter') {
-            e.preventDefault(); 
-            sendMessage(); 
-        } 
-    };
+    document.getElementById('message-input').onkeypress = function(e) { if (e.key === 'Enter') sendMessage(); };
     function scrollToBottom() { const box = document.getElementById('messages-box'); box.scrollTop = box.scrollHeight; }
 </script>
 </body>

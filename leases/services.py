@@ -5,6 +5,7 @@ from django.conf import settings
 from django.db.models import Sum
 from django.utils import timezone
 from .models import *
+from .notifications import notify_monthly_billing_and_due_rent
 
 def create_settlement(inspection):
     lease = inspection.move_out_request.lease
@@ -68,10 +69,21 @@ def create_monthly_rent_charge(lease, billing_month):
 
 def create_rent_charge(lease):
     charge = RentCharge.objects.create(
-        lease=lease, billing_month=timezone.now().date(), due_date=timezone.now().date(),
-        rent_amount=lease.unit.monthly_rent, amount_paid=Decimal("0.00"), balance=lease.unit.monthly_rent, status="UNPAID"
+        lease=lease, 
+        billing_month=timezone.now().date(), 
+        due_date=timezone.now().date(),
+        rent_amount=lease.unit.monthly_rent, 
+        amount_paid=Decimal("0.00"), 
+        balance=lease.unit.monthly_rent, 
+        status="UNPAID"
     )
+    
+    # 1. Apply wallet credits first to deduce final status and balances
     apply_wallet_to_charge(charge)
+    
+    # 2. Trigger the real-time notification immediately based on the final charge state
+    notify_monthly_billing_and_due_rent(charge)
+    
     return charge
 
 def allocate_wallet_credit(lease):

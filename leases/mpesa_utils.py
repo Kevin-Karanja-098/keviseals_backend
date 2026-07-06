@@ -30,7 +30,7 @@ def initiate_stk_push(phone_number, amount, account_reference):
         "PartyA": phone_number,
         "PartyB": shortcode,
         "PhoneNumber": phone_number,
-        "CallBackURL": "https://kevinkaranja098.pythonanywhere.com/api/leases/payments/callback/",
+        "CallBackURL": "https://intermastoid-verna-issueless.ngrok-free.dev/api/leases/payments/callback/",
         "AccountReference": account_reference,
         "TransactionDesc": "Rent Payment"
     }
@@ -57,8 +57,8 @@ def initiate_b2c_payment(phone_number, amount, remarks, occasion=""):
         "PartyB": phone_number,
         "Remarks": remarks,
         "Occasion": occasion,
-        "QueueTimeOutURL": "https://kevinkaranja098.pythonanywhere.com/api/leases/settlements/b2c/timeout/",
-        "ResultURL": "https://kevinkaranja098.pythonanywhere.com/api/leases/settlements/b2c/result/",
+        "QueueTimeOutURL": "https://intermastoid-verna-issueless.ngrok-free.dev/api/leases/settlements/b2c/timeout/",
+        "ResultURL": "https://intermastoid-verna-issueless.ngrok-free.dev/api/leases/settlements/b2c/result/",
     }
     response = requests.post(
         "https://sandbox.safaricom.co.ke/mpesa/b2c/v3/paymentrequest",

@@ -2,18 +2,26 @@ from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
 from django.conf import settings
+from django.db.models import Sum
 from rest_framework import generics, status, serializers
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.views import APIView
+
 from accounts.models import TenantProfile, LandlordProfile
 from accounts.permissions import IsLandlord
-from .mpesa_utils import *
 from properties.models import Unit
 from .models import *
 from .serializers import *
 from .services import *
-from django.conf import settings
+from .mpesa_utils import *
+
+from .notifications import *
+
+
+# ==========================================
+# DRF CONTROLLERS / VIEWS
+# ==========================================
 
 # --- LEASE REQUEST VIEWS ---
 
@@ -24,10 +32,11 @@ class LeaseRequestCreateView(generics.CreateAPIView):
     def perform_create(self, serializer):
         tenant = TenantProfile.objects.get(user=self.request.user)
         unit = Unit.objects.get(id=self.request.data.get("unit"))
-        serializer.save(
+        lr = serializer.save(
             tenant=tenant, deposit_required=unit.deposit_amount, rent_required=unit.monthly_rent,
             required_amount=unit.deposit_amount + unit.monthly_rent, amount_paid=0, status="PAYMENT_PENDING"
         )
+        notify_lease_request_created(lr)
 
 class MyLeaseRequestsView(generics.ListAPIView):
     serializer_class = LeaseRequestSerializer
@@ -59,6 +68,8 @@ class ApproveLeaseRequestView(generics.UpdateAPIView):
 
         lr.status, lr.unit.occupancy_status = "APPROVED", "OCCUPIED"
         lr.save(update_fields=["status"]), lr.unit.save(update_fields=["occupancy_status"])
+        
+        notify_lease_approved(lease)
         return Response({"message": "Lease approved successfully.", "lease_id": lease.id, "entry_code": lease.entry_code})
 
 class RejectLeaseRequestView(generics.UpdateAPIView):
@@ -70,7 +81,9 @@ class RejectLeaseRequestView(generics.UpdateAPIView):
         lr = self.get_object()
         lr.status = "REJECTED"
         lr.save(update_fields=["status"])
+        notify_lease_rejected(lr)
         return Response({"message": "Lease request rejected"})
+
 
 # --- MPESA & BILLING VIEWS ---
 
@@ -91,6 +104,8 @@ class InitiateLeaseRequestPaymentView(generics.CreateAPIView):
 
         pay.checkout_request_id, pay.merchant_request_id = res.get("CheckoutRequestID", ""), res.get("MerchantRequestID", "")
         pay.save(update_fields=["checkout_request_id", "merchant_request_id"])
+        
+        notify_stk_sent(pay)
         return Response(res)
 
 class InitiateLeaseWalletPaymentView(generics.CreateAPIView):
@@ -106,6 +121,8 @@ class InitiateLeaseWalletPaymentView(generics.CreateAPIView):
 
         pay.checkout_request_id, pay.merchant_request_id = res.get("CheckoutRequestID", ""), res.get("MerchantRequestID", "")
         pay.save(update_fields=["checkout_request_id", "merchant_request_id"])
+        
+        notify_stk_sent(pay)
         return Response(res)
 
 class MpesaCallbackView(generics.CreateAPIView):
@@ -113,38 +130,78 @@ class MpesaCallbackView(generics.CreateAPIView):
 
     def create(self, request, *args, **kwargs):
         cb = request.data.get("Body", {}).get("stkCallback", {})
-        checkout_id, res_code = cb.get("CheckoutRequestID"), str(cb.get("ResultCode"))
+        checkout_id = cb.get("CheckoutRequestID")
+        res_code = str(cb.get("ResultCode", ""))
 
-        payment, st_tx = Payment.objects.filter(checkout_request_id=checkout_id).first(), SettlementTransaction.objects.filter(checkout_request_id=checkout_id).first()
-        if not payment and not st_tx: return Response({"error": "Transaction not found"}, 404)
+        if not checkout_id:
+            return Response({"error": "Invalid callback structure"}, status=status.HTTP_400_BAD_REQUEST)
 
+        # 1. Look up the incoming payload reference against both transaction variants
+        payment = Payment.objects.filter(checkout_request_id=checkout_id).first()
+        st_tx = SettlementTransaction.objects.filter(checkout_request_id=checkout_id).first()
+        
+        if not payment and not st_tx: 
+            return Response({"error": "Transaction not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        # 2. Handle transaction failures gracefully (Safaricom ResultCode != "0")
         if res_code != "0":
-            if payment: payment.status = "FAILED"; payment.save(update_fields=["status"])
-            if st_tx: st_tx.status = "FAILED"; st_tx.save(update_fields=["status"])
-            return Response({"message": "Payment failed"})
+            if payment: 
+                payment.status = "FAILED"
+                payment.save(update_fields=["status"])
+                notify_stk_failed(payment)
+                
+            if st_tx: 
+                st_tx.status = "FAILED"
+                st_tx.save(update_fields=["status"])
+                # 👇 Using your explicit settlement-specific failure tracker hook
+                notify_settlement_stk_failed(st_tx)
+                
+            return Response({"message": "Payment recorded as failed."})
 
-        receipt = next((i.get("Value") for i in cb.get("CallbackMetadata", {}).get("Item", []) if i.get("Name") == "MpesaReceiptNumber"), "")
+        # 3. Extract Safaricom's alphanumeric tracking code
+        receipt = next(
+            (i.get("Value") for i in cb.get("CallbackMetadata", {}).get("Item", []) if i.get("Name") == "MpesaReceiptNumber"), 
+            ""
+        )
 
+        # 4. PROCESS VARIANT A: Standard Lease / Wallet Top-Up Payment Flow
         if payment:
-            if payment.status == "SUCCESS": return Response({"message": "Payment already processed"})
-            if payment.lease_request:
-                payment.lease_request.amount_paid += payment.amount
-                payment.lease_request.save(update_fields=["amount_paid"])
-            elif payment.lease:
-                rem = apply_payment_to_charges(payment.lease, payment.amount)
-                if rem > 0:
-                    payment.lease.wallet.available_credit += rem
-                    payment.lease.wallet.save(update_fields=["available_credit"])
-            payment.status, payment.mpesa_receipt = "SUCCESS", receipt
-            payment.save(update_fields=["status", "mpesa_receipt"])
-            return Response({"message": "Payment successful"})
+            if payment.status == "SUCCESS": 
+                return Response({"message": "Payment already processed"})
+            
+            # Wrap business calculations in an atomic transaction lock for data integrity
+            with transaction.atomic():
+                if payment.lease_request:
+                    payment.lease_request.amount_paid += payment.amount
+                    payment.lease_request.save(update_fields=["amount_paid"])
+                elif payment.lease:
+                    rem = apply_payment_to_charges(payment.lease, payment.amount)
+                    if rem > 0:
+                        payment.lease.wallet.available_credit += rem
+                        payment.lease.wallet.save(update_fields=["available_credit"])
+                
+                payment.status, payment.mpesa_receipt = "SUCCESS", receipt
+                payment.save(update_fields=["status", "mpesa_receipt"])
+            
+            # Re-fetch structural relational dependencies before dispatching alerts
+            payment.refresh_from_db(fields=['lease_request', 'lease', 'tenant'])
+            
+            notify_payment_success(payment)
+            return Response({"message": "Payment processed successfully."})
 
+        # 5. PROCESS VARIANT B: Lease Move-Out Closing Settlement Sheet Balance Flow
         if st_tx:
-            if st_tx.status == "SUCCESS": return Response({"message": "Settlement already processed"})
-            st_tx.status, st_tx.mpesa_receipt = "SUCCESS", receipt
-            st_tx.save(update_fields=["status", "mpesa_receipt"])
-            reconcile_settlement(st_tx.settlement)
-            return Response({"message": "Settlement payment successful"})
+            if st_tx.status == "SUCCESS": 
+                return Response({"message": "Settlement already processed"})
+            
+            with transaction.atomic():
+                st_tx.status, st_tx.mpesa_receipt = "SUCCESS", receipt
+                st_tx.save(update_fields=["status", "mpesa_receipt"])
+                reconcile_settlement(st_tx.settlement)
+            
+            # Real-time alert explicitly for settlement balance closure collections
+            notify_settlement_payment_received(st_tx.settlement)
+            return Response({"message": "Settlement payment recorded successfully."})
 
 class BillingCronView(APIView):
     permission_classes = [AllowAny]
@@ -153,6 +210,7 @@ class BillingCronView(APIView):
         if request.headers.get("X-BILLING-TOKEN") != settings.BILLING_CRON_TOKEN: return Response({"error": "Unauthorized"}, 403)
         generate_due_rent_charges()
         return Response({"message": "Billing processed"})
+
 
 # --- MOVE OUT VIEWS ---
 
@@ -168,7 +226,8 @@ class CreateMoveOutRequestView(generics.CreateAPIView):
 
         if MoveOutRequest.objects.filter(lease=lease, status="PENDING").exists():
             raise serializers.ValidationError("You already have a pending move-out request.")
-        serializer.save(lease=lease)
+        mo = serializer.save(lease=lease)
+        notify_move_out_request(mo)
 
 class MyMoveOutRequestsView(generics.ListAPIView):
     serializer_class = MoveOutRequestSerializer
@@ -181,14 +240,24 @@ class LandlordMoveOutRequestsView(generics.ListAPIView):
     get_queryset = lambda self: MoveOutRequest.objects.filter(lease__unit__property__landlord__user=self.request.user)
 
 class ApproveMoveOutRequestView(generics.UpdateAPIView):
-    queryset = MoveOutRequest.objects.all()
+    # 👇 Use select_related to pre-fetch the lease, tenant, user, and unit database records
+    queryset = MoveOutRequest.objects.all().select_related(
+        'lease__tenant__user', 
+        'lease__unit'
+    )
     permission_classes = [IsAuthenticated, IsLandlord]
 
     def update(self, request, *args, **kwargs):
         mo = self.get_object()
-        if mo.status != "PENDING": return Response({"error": "Request already processed."}, 400)
+        if mo.status != "PENDING": 
+            return Response({"error": "Request already processed."}, 400)
+            
         mo.status, mo.landlord_notes = "APPROVED", request.data.get("landlord_notes", "")
         mo.save(update_fields=["status", "landlord_notes"])
+        
+        # Call the notification function safely
+        notify_move_out_approved(mo)
+        
         return Response({"message": "Move-out approved."})
 
 class RejectMoveOutRequestView(generics.UpdateAPIView):
@@ -200,6 +269,7 @@ class RejectMoveOutRequestView(generics.UpdateAPIView):
         if mo.status != "PENDING": return Response({"error": "Request already processed."}, 400)
         mo.status, mo.landlord_notes = "REJECTED", request.data.get("landlord_notes", "")
         mo.save(update_fields=["status", "landlord_notes"])
+        notify_move_out_rejected(mo)
         return Response({"message": "Move-out rejected."})
 
 class CancelMoveOutRequestView(generics.UpdateAPIView):
@@ -248,6 +318,8 @@ class CompleteInspectionView(generics.UpdateAPIView):
         inspection.status, inspection.general_notes = "COMPLETED", request.data.get("general_notes", "")
         inspection.save(update_fields=["status", "general_notes"])
         s = create_settlement(inspection)
+        
+        notify_inspection_completed(inspection, s)
         return Response({
             "message": "Inspection completed successfully.",
             "settlement": {
@@ -256,24 +328,32 @@ class CompleteInspectionView(generics.UpdateAPIView):
             }
         })
 
+
+# --- SETTLEMENT & FINALIZE VIEWS ---
+
 class RecordSettlementPaymentView(generics.UpdateAPIView):
     queryset = LeaseSettlement.objects.all()
     permission_classes = [IsAuthenticated, IsLandlord]
 
     def update(self, request, *args, **kwargs):
-        settlement, p_type, now = self.get_object(), request.data.get("payment_type"), timezone.now()
-        if p_type == "REFUND":
-            if settlement.refund_amount <= 0: return Response({"error": "There is no refund to pay."}, 400)
-            settlement.refund_paid, settlement.refund_paid_at = True, now
-        elif p_type == "BALANCE":
-            if settlement.amount_owed <= 0: return Response({"error": "Tenant owes nothing."}, 400)
-            settlement.balance_received, settlement.balance_received_at = True, now
+        settlement = self.get_object()
+        p_type = request.data.get("payment_type")
+        now = timezone.now()
+
+        if p_type == "PAYMENT":
+            settlement.balance_received = True
+            settlement.balance_received_at = now
+        elif p_type == "SETTLEMENT":
+            settlement.refund_paid = True
+            settlement.refund_paid_at = now
         else:
-            return Response({"error": "Invalid payment type."}, 400)
+            return Response({"error": "Invalid payment type. Must be 'PAYMENT' or 'SETTLEMENT'."}, 400)
 
         settlement.payment_notes = request.data.get("payment_notes", "")
         settlement.save(update_fields=["refund_paid", "refund_paid_at", "balance_received", "balance_received_at", "payment_notes"])
-        return Response({"message": "Settlement payment recorded successfully."})
+        
+        notify_settlement_ledger_updated(settlement, p_type)
+        return Response({"message": f"Settlement transaction recorded under {p_type} successfully."})
 
 class FinalizeMoveOutView(generics.UpdateAPIView):
     queryset = LeaseSettlement.objects.all()
@@ -285,10 +365,11 @@ class FinalizeMoveOutView(generics.UpdateAPIView):
 
         if settlement.status == "FINALIZED":
             return Response({"error": "Settlement already finalized."}, status=status.HTTP_400_BAD_REQUEST)
+        
         if settlement.refund_amount > 0 and not settlement.refund_paid:
-            return Response({"error": "The tenant refund has not yet been recorded as paid."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": "The settlement payout has not yet been recorded as paid."}, status=status.HTTP_400_BAD_REQUEST)
         if settlement.amount_owed > 0 and not settlement.balance_received:
-            return Response({"error": "The tenant's outstanding balance has not yet been recorded as received."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": "The incoming clearance payment has not yet been recorded as received."}, status=status.HTTP_400_BAD_REQUEST)
 
         now = timezone.now()
         move_out = settlement.inspection.move_out_request
@@ -306,6 +387,7 @@ class FinalizeMoveOutView(generics.UpdateAPIView):
         move_out.completed_at = now
         move_out.save(update_fields=["completed_at"])
 
+        notify_lease_finalized(settlement)
         return Response({
             "message": "Move-out finalized successfully.",
             "settlement": {k: getattr(settlement, k) for k in ["id", "status", "refund_amount", "refund_paid", "amount_owed", "balance_received"]},
@@ -318,55 +400,177 @@ class InitiateSettlementPaymentView(generics.CreateAPIView):
     permission_classes = [IsAuthenticated]
 
     def create(self, request, *args, **kwargs):
-        tenant = TenantProfile.objects.get(user=request.user)
-        settlement = LeaseSettlement.objects.get(id=request.data.get("settlement"), inspection__move_out_request__lease__tenant=tenant)
+        # 1. Safely grab tenant profile
+        tenant = TenantProfile.objects.filter(user=request.user).first()
+        if not tenant:
+            return Response(
+                {"error": "Access denied. A valid Tenant Profile is required."},
+                status=status.HTTP_403_FORBIDDEN
+            )
 
-        if settlement.status == "FINANCIALLY_SETTLED": return Response({"error": "Settlement is already settled."}, 400)
-        if settlement.amount_owed <= 0: return Response({"error": "Nothing to pay."}, 400)
+        settlement_id = request.data.get("settlement")
+        if not settlement_id:
+            return Response({"error": "Settlement ID is required."}, status=status.HTTP_400_BAD_REQUEST)
 
-        remaining = settlement.amount_owed - (SettlementTransaction.objects.filter(settlement=settlement, transaction_type="COLLECTION", status="SUCCESS").aggregate(t=Sum("amount"))["t"] or Decimal("0.00"))
+        # 2. Safely grab settlement record
+        try:
+            settlement = LeaseSettlement.objects.get(
+                id=settlement_id, 
+                inspection__move_out_request__lease__tenant=tenant
+            )
+        except LeaseSettlement.DoesNotExist:
+            return Response(
+                {"error": "Settlement record not found or unauthorized access."}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # 3. Status guards
+        if settlement.status == "FINANCIALLY_SETTLED": 
+            return Response({"error": "Settlement is already fully settled."}, status=status.HTTP_400_BAD_REQUEST)
+            
+        if settlement.amount_owed <= 0: 
+            return Response({"error": "Nothing to pay for this settlement."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # 4. Check balance remaining
+        successful_payments = SettlementTransaction.objects.filter(
+            settlement=settlement, 
+            transaction_type="COLLECTION", 
+            status="SUCCESS"
+        ).aggregate(t=Sum("amount"))["t"] or Decimal("0.00")
+        
+        remaining = settlement.amount_owed - successful_payments
         if remaining <= 0:
             reconcile_settlement(settlement)
-            return Response({"message": "Settlement already paid."})
+            return Response({"message": "Settlement already fully paid."})
 
+        # 5. Check phone input
         phone = request.data.get("phone_number")
-        tx = SettlementTransaction.objects.create(settlement=settlement, transaction_type="COLLECTION", payment_method="MPESA_STK", amount=remaining, phone_number=phone, status="PENDING")
-        res = initiate_stk_push(phone_number=phone, amount=remaining, account_reference=f"SETTLEMENT-{settlement.id}")
+        if not phone:
+            return Response({"error": "Phone number is required."}, status=status.HTTP_400_BAD_REQUEST)
 
-        tx.checkout_request_id, tx.merchant_request_id = res.get("CheckoutRequestID", ""), res.get("MerchantRequestID", "")
-        tx.save(update_fields=["checkout_request_id", "merchant_request_id"])
-        return Response(res)
+        # 6. Create the pending ledger transaction tracking row
+        tx = SettlementTransaction.objects.create(
+            settlement=settlement, 
+            transaction_type="COLLECTION", 
+            payment_method="MPESA_STK", 
+            amount=remaining, 
+            phone_number=phone, 
+            status="PENDING"
+        )
+        
+        # 7. Execute external Daraja API Push Request
+        try:
+            res = initiate_stk_push(
+                phone_number=phone, 
+                amount=remaining, 
+                account_reference=f"SETTLEMENT-{settlement.id}"
+            )
+            
+            # Save Safaricom tracking references
+            tx.checkout_request_id = res.get("CheckoutRequestID", "")
+            tx.merchant_request_id = res.get("MerchantRequestID", "")
+            tx.save(update_fields=["checkout_request_id", "merchant_request_id"])
+            
+            # 🚨 FIXED: Call the correct, isolated settlement function explicitly
+            notify_settlement_stk_sent(tx)
+            
+            return Response(res, status=status.HTTP_200_OK)
+            
+        except Exception as stk_err:
+            tx.status = "FAILED"
+            tx.save(update_fields=["status"])
+            return Response(
+                {"error": f"Failed to connect to M-Pesa Gateway: {str(stk_err)}"}, 
+                status=status.HTTP_502_BAD_GATEWAY
+            )
 
-class InitiateSettlementRefundView(generics.CreateAPIView):
-    permission_classes = [IsAuthenticated, IsLandlord]
+class InitiateSettlementPaymentView(generics.CreateAPIView):
+    permission_classes = [IsAuthenticated]
 
     def create(self, request, *args, **kwargs):
-        landlord = LandlordProfile.objects.get(user=request.user)
-        settlement = LeaseSettlement.objects.get(id=request.data.get("settlement"), inspection__move_out_request__lease__unit__property__landlord=landlord)
+        # 1. Safely locate the tenant's profile without throwing a 500 server crash
+        tenant = TenantProfile.objects.filter(user=request.user).first()
+        if not tenant:
+            return Response(
+                {"error": "Access denied. A valid Tenant Profile is required to initiate settlement payments."},
+                status=status.HTTP_403_FORBIDDEN
+            )
 
-        if settlement.status == "FINALIZED": return Response({"error": "Settlement already finalized."}, status=400)
-        if settlement.refund_amount <= 0: return Response({"error": "Tenant is not owed any refund."}, status=400)
-        if settlement.refund_paid: return Response({"error": "Refund already completed."}, status=400)
+        settlement_id = request.data.get("settlement")
+        if not settlement_id:
+            return Response({"error": "Settlement ID is required."}, status=status.HTTP_400_BAD_REQUEST)
 
-        remaining = settlement.refund_amount - (SettlementTransaction.objects.filter(settlement=settlement, transaction_type="REFUND", status="SUCCESS").aggregate(total=Sum("amount"))["total"] or Decimal("0.00"))
+        # 2. Safely locate the specific settlement record
+        try:
+            settlement = LeaseSettlement.objects.get(
+                id=settlement_id, 
+                inspection__move_out_request__lease__tenant=tenant
+            )
+        except LeaseSettlement.DoesNotExist:
+            return Response(
+                {"error": "Settlement record not found or unauthorized access."}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # 3. Check baseline payment constraints
+        if settlement.status == "FINANCIALLY_SETTLED": 
+            return Response({"error": "Settlement is already fully settled."}, status=status.HTTP_400_BAD_REQUEST)
+            
+        if settlement.amount_owed <= 0: 
+            return Response({"error": "Nothing to pay for this settlement sheet."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # 4. Aggregate successful payments to determine the true remaining balance
+        successful_payments = SettlementTransaction.objects.filter(
+            settlement=settlement, 
+            transaction_type="COLLECTION", 
+            status="SUCCESS"
+        ).aggregate(t=Sum("amount"))["t"] or Decimal("0.00")
+        
+        remaining = settlement.amount_owed - successful_payments
         if remaining <= 0:
             reconcile_settlement(settlement)
-            return Response({"message": "Refund already completed."})
+            return Response({"message": "Settlement already fully paid."})
 
-        phone = phone = settlement.inspection.move_out_request.lease.tenant.user.phone_number
-        tx = SettlementTransaction.objects.create(settlement=settlement, transaction_type="REFUND", payment_method="MPESA_B2C", amount=remaining, phone_number=phone, status="PENDING")
-        response = initiate_b2c_payment(phone_number=phone, amount=remaining, remarks=f"Refund Settlement {settlement.id}", occasion="Tenant Refund")
-        print("B2C RESPONSE:", response)
+        # 5. Handle M-Pesa Phone Number input verification
+        phone = request.data.get("phone_number")
+        if not phone:
+            return Response({"error": "Phone number is required to process M-Pesa payments."}, status=status.HTTP_400_BAD_REQUEST)
 
-        tx.conversation_id, tx.originator_conversation_id = response.get("ConversationID", ""), response.get("OriginatorConversationID", "")
-        print("Conversation:", tx.conversation_id)
-        print("Originator:", tx.originator_conversation_id)
-        tx.save(update_fields=["conversation_id", "originator_conversation_id"])
-        tx.refresh_from_db()
-        print("Saved Conversation:", tx.conversation_id)
-        print("Saved Originator:", tx.originator_conversation_id)
-        return Response(response)
-
+        # 6. Initialize local tracking row
+        tx = SettlementTransaction.objects.create(
+            settlement=settlement, 
+            transaction_type="COLLECTION", 
+            payment_method="MPESA_STK", 
+            amount=remaining, 
+            phone_number=phone, 
+            status="PENDING"
+        )
+        
+        # 7. Safe Execution Block for external M-Pesa/Daraja push requests
+        try:
+            res = initiate_stk_push(
+                phone_number=phone, 
+                amount=remaining, 
+                account_reference=f"SETTLEMENT-{settlement.id}"
+            )
+            
+            # Map tracking references returned from Daraja API
+            tx.checkout_request_id = res.get("CheckoutRequestID", "")
+            tx.merchant_request_id = res.get("MerchantRequestID", "")
+            tx.save(update_fields=["checkout_request_id", "merchant_request_id"])
+            
+            # Fire off push alerts/emails confirming prompt departure
+            notify_settlement_stk_sent(tx)
+            return Response(res, status=status.HTTP_200_OK)
+            
+        except Exception as stk_err:
+            # Drop tracking row status if integration gateway drops or errors
+            tx.status = "FAILED"
+            tx.save(update_fields=["status"])
+            return Response(
+                {"error": f"Failed to connect to M-Pesa Gateway: {str(stk_err)}"}, 
+                status=status.HTTP_502_BAD_GATEWAY
+            )
 class B2CQueueTimeoutView(generics.CreateAPIView):
     permission_classes = [AllowAny]
 
@@ -382,76 +586,34 @@ class B2CResultCallbackView(generics.CreateAPIView):
 
     @transaction.atomic
     def create(self, request, *args, **kwargs):
-
         res = request.data.get("Result", {})
-
-        tx = SettlementTransaction.objects.filter(
-            conversation_id=res.get("ConversationID")
-        ).select_related("settlement").first()
+        tx = SettlementTransaction.objects.filter(conversation_id=res.get("ConversationID")).select_related("settlement").first()
 
         if not tx:
-            return Response(
-                {"error": "Transaction not found."},
-                status=status.HTTP_404_NOT_FOUND
-            )
+            return Response({"error": "Transaction not found."}, status=status.HTTP_404_NOT_FOUND)
 
         if tx.status == "SUCCESS":
-            return Response(
-                {"message": "Refund already processed."},
-                status=status.HTTP_200_OK
-            )
+            return Response({"message": "Refund already processed."}, status=status.HTTP_200_OK)
 
         tx.result_code = str(res.get("ResultCode", ""))
         tx.result_desc = res.get("ResultDesc", "")
 
-        simulate_success = (
-            settings.SIMULATE_B2C_SUCCESS
-            and tx.result_desc == "The security credential is locked."
-        )
+        simulate_success = (settings.SIMULATE_B2C_SUCCESS and tx.result_desc == "The security credential is locked.")
 
         if tx.result_code == "0" or simulate_success:
-
             tx.status = "SUCCESS"
-            tx.save(update_fields=[
-                "status",
-                "result_code",
-                "result_desc",
-            ])
+            tx.save(update_fields=["status", "result_code", "result_desc"])
 
             settlement = tx.settlement
-
             settlement.refund_paid = True
             settlement.refund_paid_at = timezone.now()
-
-            settlement.save(update_fields=[
-                "refund_paid",
-                "refund_paid_at",
-            ])
+            settlement.save(update_fields=["refund_paid", "refund_paid_at"])
 
             reconcile_settlement(settlement)
-
-            return Response(
-                {
-                    "message": "Refund completed successfully.",
-                    "simulated": simulate_success,
-                    "settlement_status": settlement.status
-                },
-                status=status.HTTP_200_OK
-            )
+            
+            notify_settlement_ledger_updated(settlement, "SETTLEMENT")
+            return Response({"message": "Refund completed successfully.", "simulated": simulate_success, "settlement_status": settlement.status}, status=status.HTTP_200_OK)
 
         tx.status = "FAILED"
-
-        tx.save(update_fields=[
-            "status",
-            "result_code",
-            "result_desc",
-        ])
-
-        return Response(
-            {
-                "message": "Refund failed.",
-                "reason": tx.result_desc,
-                "result_code": tx.result_code,
-            },
-            status=status.HTTP_200_OK
-        )
+        tx.save(update_fields=["status", "result_code", "result_desc"])
+        return Response({"message": "Refund failed.", "reason": tx.result_desc, "result_code": tx.result_code}, status=status.HTTP_200_OK)

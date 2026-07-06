@@ -21,10 +21,12 @@ from rest_framework_simplejwt.views import (
 )
 from django.conf.urls.static import static
 
+from chat.views import firebase_sw
 from keviseals_backend import settings
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+    path("firebase-messaging-sw.js", firebase_sw),
     path(
         "api/accounts/",
         include("accounts.urls")

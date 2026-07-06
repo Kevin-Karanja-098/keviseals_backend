@@ -32,5 +32,5 @@ urlpatterns = [
     path("settlements/pay/",InitiateSettlementPaymentView.as_view()),
     path("settlements/b2c/result/", B2CResultCallbackView.as_view(), name="b2c-result"),
     path("settlements/b2c/timeout/", B2CQueueTimeoutView.as_view(), name="b2c-timeout"),
-    path("settlements/refund/",InitiateSettlementRefundView.as_view()),
+    path("settlements/refund/",InitiateSettlementPaymentView.as_view()),
 ]
