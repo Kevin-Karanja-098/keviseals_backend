@@ -65,3 +65,15 @@ class SettlementTransactionSerializer(serializers.ModelSerializer):
     class Meta:
         model = SettlementTransaction
         fields = "__all__"
+
+class AvailableUnitSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Unit
+        fields = (
+            "id",
+            "property",
+            "monthly_rent",
+            "deposit_amount",
+            "occupancy_status",
+        )
+        read_only_fields = fields

@@ -50,6 +50,9 @@ SECRET_KEY = 'django-insecure-f0y^3yg5(g0@-vv+-@#6mlwvh=v%id4#_5s6eb*f*(=vhu&&_0
 DEBUG = True
 
 ALLOWED_HOSTS = [ '*' ]
+CSRF_TRUSTED_ORIGINS = [
+    "https://quantities-guided-roy-circle.trycloudflare.com",
+]
 
 
 # Application definition
@@ -111,6 +114,19 @@ MIDDLEWARE = [
 ]
 
 CORS_ALLOW_ALL_ORIGINS = True
+
+CORS_ALLOW_HEADERS = [
+    "accept",
+    "accept-encoding",
+    "authorization",
+    "content-type",
+    "dnt",
+    "origin",
+    "user-agent",
+    "x-csrftoken",
+    "x-requested-with",
+    "ngrok-skip-browser-warning", # <-- This allows your mobile app's GET request to pass
+]
 
 CORS_ALLOW_CREDENTIALS = True
 

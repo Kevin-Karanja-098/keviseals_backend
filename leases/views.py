@@ -22,7 +22,14 @@ from .notifications import *
 # ==========================================
 # DRF CONTROLLERS / VIEWS
 # ==========================================
+class AvailableUnitsView(generics.ListAPIView):
+    serializer_class = AvailableUnitSerializer
+    permission_classes = [IsAuthenticated]
 
+    def get_queryset(self):
+        return Unit.objects.filter(
+            occupancy_status="AVAILABLE"
+        ).order_by("id")
 # --- LEASE REQUEST VIEWS ---
 
 class LeaseRequestCreateView(generics.CreateAPIView):
